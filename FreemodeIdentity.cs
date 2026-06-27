@@ -149,8 +149,6 @@ namespace FreemodeIdentity {
 		// Fallback return target when no source protagonist was captured. One of
 		// player_zero/one/two; defaults to Michael.
 		string ReturnProtagonist;
-		// The three story-protagonist models, in character-wheel order (Michael, Franklin, Trevor).
-		static readonly string[] Protagonists = { "player_zero", "player_one", "player_two" };
 
 		// Auto-apply settle + clobber-reapply (NOT a one-shot — re-arms on death/mission-fail
 		// force-swap; see OnTick). SpoofSettleTarget below is deliberately > SettleTarget so
@@ -490,12 +488,12 @@ namespace FreemodeIdentity {
 
 		// Gate for the auto/persisted spoof re-engage. Must NOT spoof a half-loaded ped or
 		// race our own appearance apply (which swaps the model ~0.5s after fade-in). Require a
-		// live freemode (non-protagonist) ped, the screen faded in, and the ped + model
+		// live freemode BODY (not a genuine protagonist), the screen faded in, and the ped + model
 		// UNCHANGED for a settle window — the stability check means we only engage AFTER the
 		// ped (including our own apply) has stopped changing.
 		bool AutoSpoofReady() {
 			Ped ped = Game.Player?.Character;
-			bool stable = ped != null && ped.Exists() && Identity.Current() == null
+			bool stable = ped != null && ped.Exists() && PlayerIdentity.IsFreemodeBody(ped)
 				&& GTA.UI.Screen.IsFadedIn;
 			if (!stable) {
 				spoofSettleTicks = 0;
@@ -599,14 +597,9 @@ namespace FreemodeIdentity {
 		// Shared snapshot kickoff. Mood + tattoos can't be read synchronously (the facial task
 		// churns; the tattoo array base must be discovered), so they run tick-driven off the hot
 		// path; we set SnapshotPending and the tick loop runs DoSnapshot once they finish.
-		// The player's REAL freemode model hash, seeing through a live spoof (which overwrites the
-		// archetype hash that ped.Model.Hash reads). 0 if there's no ped. Used by the capture path
-		// so a snapshot taken while spoofed sees Freemode, not the impersonated protagonist.
-		int RealPlayerModelHash() {
-			if (spoof.Held && spoof.OriginalHash != 0) return unchecked((int)spoof.OriginalHash);
-			Ped ped = Game.Player?.Character;
-			return ped != null ? ped.Model.Hash : 0;
-		}
+		// The player's REAL model hash, seeing through a live spoof. Used by the capture path so a
+		// snapshot taken while spoofed sees Freemode, not the impersonated protagonist.
+		int RealPlayerModelHash() => PlayerIdentity.RealModelHash(Game.Player?.Character, spoof);
 
 		void BeginSnapshot(Ped player, string slotName, PedAppearance.CaptureOptions opts, bool makeActive = false) {
 			if (PedAppearance.IsFreemodeHash(RealPlayerModelHash())) {
@@ -617,7 +610,7 @@ namespace FreemodeIdentity {
 				}
 				PedHeadBlendMemory.BeginFind(player);
 				if (opts.Tattoos && !PedDecorationMemory.BaseKnown) {
-					DecorationBaseFinder.Begin(player);
+					DecorationBaseFinder.Begin(player, RealPlayerModelHash());
 				}
 				PendingSlotName = slotName;
 				PendingOptions = opts;
@@ -745,25 +738,14 @@ namespace FreemodeIdentity {
 			}
 		}
 
-		// Record the live story protagonist as the "original" to return to on Disable. No-ops
-		// once captured / while freemode. The spoof check is now spoof.Held IN MEMORY: if our
-		// own spoof is engaged the protagonist reading is OURS, not real, so don't capture it.
+		// Record the live story protagonist as the "original" to return to on Disable. No-ops once
+		// captured / while the body is freemode (incl. a spoof painting a protagonist hash — that
+		// reading is OURS, not real, and PlayerIdentity sees through it from the live body).
 		void RememberSourceIfProtagonist() {
 			if (!string.IsNullOrEmpty(SourceModel)) return;
-			Ped ped = Game.Player?.Character;
-			if (ped == null) return;
-			string match = null;
-			foreach (string m in Protagonists) {
-				if (ped.Model.Hash == new Model(m).Hash) {
-					match = m;
-					break;
-				}
-			}
-			if (match == null) return;
-			// Reads as a protagonist — but if our spoof is holding, that hash is the SPOOF, not
-			// real. (In-process check; no file read.)
-			if (spoof.Held) return;
-			SourceModel = match;
+			string genuine = PlayerIdentity.GenuineProtagonist(Game.Player?.Character, spoof);
+			if (genuine == null) return;
+			SourceModel = Identity.ModelName(genuine);
 			Config.SetValue("State", "SourceModel", SourceModel);
 			Config.Save();
 			Logger.Log($"Captured source protagonist model={SourceModel}.");
@@ -808,7 +790,7 @@ namespace FreemodeIdentity {
 				// Skip the apply only when Edit Mode is on AND we're still on the edited freemode ped —
 				// snapping the slot back would clobber the live edit. After a disable swapped us to the
 				// protagonist there's no edit left to protect, so apply normally.
-				if (EditMode && PedAppearance.IsFreemode(Game.Player?.Character)) {
+				if (EditMode && PlayerIdentity.IsFreemodeBody(Game.Player?.Character)) {
 					Warn("Edit Mode is on", "- your live edit is left alone. Turn Edit Mode off to apply the active slot.");
 					return;
 				}
@@ -1006,16 +988,16 @@ namespace FreemodeIdentity {
 		}
 
 		// Grey out the Spoofing items while the player is a GENUINE protagonist — engaging
-		// there is blocked (would hijack real money). "Genuine" = reads as a protagonist AND
-		// our own spoof isn't the cause (spoof.Held in memory).
+		// there is blocked (would hijack real money). PlayerIdentity sees through our own spoof
+		// from the live body, so a spoofed freemode ped is never mistaken for a real protagonist.
 		void RefreshSpoofAvailability() {
-			bool onRealProtagonist = !spoof.Held && Identity.Current() != null;
-			bool available = !onRealProtagonist;
+			string genuine = PlayerIdentity.GenuineProtagonist(Game.Player?.Character, spoof);
+			bool available = genuine == null;
 			if (SpoofMenuItem.Enabled != available) SpoofMenuItem.Enabled = available;
 			if (SpoofItem.Enabled != available) SpoofItem.Enabled = available;
 			if (TargetItem.Enabled != available) TargetItem.Enabled = available;
-			SpoofMenuItem.Description = onRealProtagonist
-				? $"Unavailable as a real {Identity.Current()} - switch to a freemode character."
+			SpoofMenuItem.Description = genuine != null
+				? $"Unavailable as a real {genuine} - switch to a freemode character."
 				: "Disguise as a protagonist so shops open.";
 		}
 
@@ -1139,7 +1121,7 @@ namespace FreemodeIdentity {
 		// Other Start misses are transient (ped not ready) and left to the OnTick auto-retry.
 		void SetSpoofEnabled(bool on) {
 			if (on) {
-				string current = Identity.Current();
+				string current = PlayerIdentity.GenuineProtagonist(Game.Player?.Character, spoof);
 				if (current != null) {
 					Warn($"Can't spoof as {current}", "- switch to a freemode character first.");
 					SpoofItem.Checked = false;
@@ -1252,10 +1234,8 @@ namespace FreemodeIdentity {
 			string seenAs = Identity.Current() ?? "freemode";
 			DbgSeenAsItem.Title = $"Game sees you as: {seenAs}";
 
-			// Base = the real model under any spoof: its captured original when held, else (no
-			// spoof layer) the live model is the real one.
-			Ped ped = Game.Player?.Character;
-			uint baseHash = spoof.Held ? spoof.OriginalHash : (ped != null ? unchecked((uint)ped.Model.Hash) : 0u);
+			// Base = the real model under any spoof, read from the live body (see PlayerIdentity).
+			uint baseHash = unchecked((uint)RealPlayerModelHash());
 			DbgBaseModelItem.Title = baseHash != 0 ? $"Base / real model: {DescribeModel(baseHash)}" : "Base / real model: -";
 
 			// "want" = the standing intent (spoofEnabled): which protagonist we'll auto-reengage as

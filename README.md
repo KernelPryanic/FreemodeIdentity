@@ -38,7 +38,9 @@ freezes the game.
 A Menyoo **randomizer** face (and addon/custom models) lives outside the head-blend
 system and can't round-trip; the mod detects this, warns at save time, and leaves the
 face untouched on apply rather than writing garbage. Faces built with the **heritage
-sliders** or the in-game creator capture fine.
+sliders** or the in-game creator capture fine - and so do **manual Menyoo edits** where
+you set the **Head Features** yourself, since those stay inside the head-blend system the
+mod reads back.
 
 ## How spending works
 
@@ -54,6 +56,12 @@ payouts that flow through the stat while spoofed. Spending **only sticks with th
 wallet on**: with it off, a purchase completes but the protagonist's real balance never
 changes (the shop pokes a cash mirror the game reverts), so the wallet redirect is what
 makes money real.
+
+Because the wallet rides the protagonist's own cash stat, the rest of the game reads it
+as real money: **ATMs and the pause menu show the right balance**, and external job mods
+pay into and charge it correctly. Tested with
+[Casual Jobs (Rabbit Holes)](https://www.gta5-mods.com/scripts/casual-jobs-rabbit-holes) -
+job payouts land in the wallet while spoofed.
 
 ## Install
 
@@ -150,5 +158,8 @@ commit builds and publishes a release - the tag is the version source of truth.
   system, so the face isn't captured. The mod warns and saves the rest of the look.
 - **No spending with the wallet off.** A freemode ped can't actually spend a
   protagonist's real cash; only the wallet redirect makes charges stick.
+- **Some charges bypass the stat entirely.** A few interactions (e.g. a prostitute's
+  service) deduct through their own in-game logic, not the cash stat the shim hooks, so
+  they come out free even with the wallet on. Shops, ATMs and stat-based payouts work.
 - **Overlay tint colours** round-trip shape and opacity but not the palette colour on
   Enhanced yet; **custom moving styles/moods** outside the known tables are left unset.

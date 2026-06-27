@@ -59,7 +59,9 @@ namespace FreemodeIdentity {
 		public static bool IsRunning => phase != Phase.Idle && phase != Phase.Done;
 
 
-		public static void Begin(Ped player) {
+		// realModelHash: the ped's TRUE freemode model (the caller resolves it through any spoof, since
+		// capture can run while spoofed and player.Model.Hash would read the painted protagonist hash).
+		public static void Begin(Ped player, int realModelHash) {
 			if (IsRunning) {
 				return; // a sweep is already in progress
 			}
@@ -70,7 +72,7 @@ namespace FreemodeIdentity {
 				Logger.Log("DecorationBaseFinder: no live ped — cannot enable tattoo capture.");
 				return;
 			}
-			if (!PedAppearance.IsFreemode(player)) {
+			if (!PedAppearance.IsFreemodeHash(realModelHash)) {
 				Logger.Log("DecorationBaseFinder: not a freemode ped — tattoo capture only applies to the MP character.");
 				return;
 			}
@@ -83,7 +85,7 @@ namespace FreemodeIdentity {
 			// latch a permanent "failed" flag: discovery can flake intermittently (the same ped has
 			// failed once then succeeded), so a failed sweep just means "no tattoos this snapshot" and
 			// the next snapshot retries. The sweep itself is content-based and reliable.
-			bool female = player.Model.Hash == new Model(PedAppearance.FemaleModel).Hash;
+			bool female = realModelHash == new Model(PedAppearance.FemaleModel).Hash;
 			string[] overlays = female ? FemaleSentinelOverlays : MaleSentinelOverlays;
 			collHash = Joaat.Hash(SentinelCollection);
 			overlay0 = Joaat.Hash(overlays[0]);

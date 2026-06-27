@@ -105,11 +105,6 @@ namespace FreemodeIdentity {
 			return true;
 		}
 
-		public static bool IsFreemode(Ped ped) {
-			if (ped == null) return false;
-			return IsFreemodeHash(ped.Model.Hash);
-		}
-
 		// Hash-based check, so callers can test the ped's REAL model when a spoof has overwritten
 		// the archetype hash that ped.Model.Hash reads (the disguise makes a freemode ped report a
 		// protagonist hash). The ped's actual body/head-blend memory is still freemode underneath.

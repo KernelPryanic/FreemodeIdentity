@@ -73,6 +73,7 @@
     <Compile Include="MovingStyles.cs" />
     <!-- Wallet / spoof engine (from FreemodeWallet). -->
     <Compile Include="Identity.cs" />
+    <Compile Include="PlayerIdentity.cs" />
     <Compile Include="Spoof.cs" />
     <Compile Include="Wallet.cs" />
     <Compile Include="ShimBridge.cs" />

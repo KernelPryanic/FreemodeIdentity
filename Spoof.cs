@@ -69,7 +69,7 @@ namespace FreemodeIdentity {
 			// freemode onto a REAL protagonist's shared model-info corrupts it (the model then can't be
 			// re-requested, so even a forced SET_PLAYER_MODEL no-ops and the protagonist body sticks). A
 			// freemode body has a valid head blend; a protagonist has none — the hash-independent tell.
-			if (!PedAppearance.HasFreemodeBody(ped)) {
+			if (!PlayerIdentity.IsFreemodeBody(ped)) {
 				Logger.Log("Spoof: player body isn't a freemode ped (genuine protagonist on load) — skipping stranded restore.");
 				return false;
 			}
