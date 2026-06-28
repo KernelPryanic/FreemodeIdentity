@@ -15,16 +15,18 @@ namespace FreemodeIdentity {
 	// spending / redirected payouts are unavailable.
 	internal sealed class ShimBridge {
 		const string AsiName = "FreemodeIdentity.asi";
-		const int ExpectedVersion = 1;
+		const int ExpectedVersion = 2;
 
-		// Field byte offsets in the shared struct (4-byte ints, naturally packed).
+		// Field byte offsets in the shared struct. Six 4-byte ints, then an 8-byte pointer placed
+		// last on its natural 8-byte boundary (even int count before it ⇒ no padding).
 		const int OffVersion = 0;
 		const int OffRedirect = 4;
 		const int OffActiveStat = 8;
 		const int OffBalance = 12;
 		const int OffPendingDelta = 16;
 		const int OffLogLevel = 20;
-		const int StateSize = 24;
+		const int OffDecorationBase = 24;
+		const int StateSize = 32;
 
 		[DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
 		static extern IntPtr GetModuleHandle(string name);
@@ -89,6 +91,17 @@ namespace FreemodeIdentity {
 			Marshal.WriteInt32(state, OffActiveStat, activeStat);
 			Marshal.WriteInt32(state, OffBalance, balance);
 			Marshal.WriteInt32(state, OffLogLevel, logLevel);
+		}
+
+		// The ped-decoration array base the shim resolved from the live .text (0 if it couldn't, or
+		// the shim isn't connected). C# uses this on Enhanced — where it can't pattern-scan the
+		// encrypted .text itself. Returns IntPtr.Zero when unavailable, in which case tattoos are
+		// simply skipped this snapshot (no fallback that could touch the ped).
+		public IntPtr DecorationBase {
+			get {
+				if (state == IntPtr.Zero) return IntPtr.Zero;
+				return (IntPtr)Marshal.ReadInt64(state, OffDecorationBase);
+			}
 		}
 
 		// Read the shim's accumulated signed change (debit < 0 / payout > 0) and zero it. The

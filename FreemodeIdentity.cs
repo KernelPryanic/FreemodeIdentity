@@ -120,6 +120,15 @@ namespace FreemodeIdentity {
 		// starts off so a reload can never leave the mod silently passive.
 		bool EditMode;
 		NativeCheckboxItem EditModeItem;
+		// Edit Mode is silent (the mod goes passive) and not persisted, so it's easy to leave on after
+		// closing the menu. Re-warn periodically while it's on AND no menu is open, but only a few times
+		// then go quiet — the point is to catch a forgotten toggle, not to nag a long editing session.
+		// Both counters reset whenever a menu is open or Edit Mode flips, so re-entering Edit Mode gives
+		// a fresh set. editModeReminderMs: game-time ms of the last reminder (-1 = none yet).
+		int editModeReminderMs = -1;
+		int editModeReminderCount;
+		const int EditModeReminderIntervalMs = 60000;
+		const int EditModeReminderMax = 3; // a few nudges, then assume it's deliberate
 
 		// A snapshot queued into a slot. The capture is deferred across ticks (mood/head-blend/
 		// tattoo scans), so the slot name + options are captured up front.
@@ -183,7 +192,7 @@ namespace FreemodeIdentity {
 		// True while a user snapshot is still being written (deferred capture). Apply must
 		// wait or it would restore the PREVIOUS save.
 		bool SnapshotInProgress =>
-			SnapshotPending || MoodMemory.IsRunning || PedHeadBlendMemory.FindRunning || DecorationBaseFinder.IsRunning;
+			SnapshotPending || MoodMemory.IsRunning || PedHeadBlendMemory.FindRunning;
 
 		// --- Wallet / spoof config --------------------------------------------------------
 		bool walletEnabled;
@@ -196,12 +205,17 @@ namespace FreemodeIdentity {
 		uint spoofSourceHash;
 		bool strandedRecoveryDone; // one-shot guard for the startup stranded-hash recovery
 		LogLevel logLevel;
+		string buildOverride; // [General] Build: Auto (detect) | Enhanced | Legacy
 
 		// Spoof settle gate (see AutoSpoofReady). > SettleTarget so appearance lands first.
 		const int SpoofSettleTarget = 45;
 		int spoofSettleTicks;
 		int spoofSettlePed;
 		int spoofSettleModel;
+		// Backoff after a failed auto-spoof engage so a persistently-unspoofable ped (e.g. an
+		// unhealable stranded poison) can't retry every tick — that busy-loop froze the game.
+		int autoSpoofRetryMs = -1;
+		const int AutoSpoofRetryCooldownMs = 3000;
 
 		bool redirectLogged; // last-logged redirect state, to edge-trigger the transition log
 
@@ -219,7 +233,7 @@ namespace FreemodeIdentity {
 
 			earning = new Earning(wallet);
 			wallet.Load();
-			Logger.LogBanner($"Config: enabled={Enabled} wallet={walletEnabled} earning={earningEnabled} spoof={spoofEnabled} target={spoofTarget} menuKey={menuKey}.");
+			Logger.LogBanner($"Config: edition={GameBuild.Current} enabled={Enabled} wallet={walletEnabled} earning={earningEnabled} spoof={spoofEnabled} target={spoofTarget} menuKey={menuKey}.");
 
 			XmlAppearanceStorage.Initialize(ScriptPaths.DataDirectory);
 			MenuInit();
@@ -246,6 +260,12 @@ namespace FreemodeIdentity {
 			logLevel = ParseLogLevel(Config.GetValue("General", "LogLevel", nameof(LogLevel.Debug)));
 			Logger.Threshold = logLevel;
 
+			// Edition select: "Auto" (default) auto-detects Enhanced vs Legacy by host module
+			// name; "Enhanced"/"Legacy" forces it. Resolved before any version-pinned constant
+			// is read, so the override always wins.
+			buildOverride = Config.GetValue("General", "Build", "Auto");
+			GameBuild.Configure(buildOverride);
+
 			Enabled = Config.GetValue("Appearance", "Enabled", true);
 			ReturnProtagonist = Config.GetValue("Appearance", "ReturnProtagonist", "player_zero");
 
@@ -258,9 +278,11 @@ namespace FreemodeIdentity {
 				spoofTarget = Identity.Franklin;
 			}
 
-			ManualTattoos = Config.GetValue("ManualSave", "Tattoos", false);
-			ManualMood = Config.GetValue("ManualSave", "Mood", false);
+			// Read light-first (MovingStyle, Tattoos, Mood) to match the menu + ini order. Tattoos and
+			// Moving Style default ON (both a quick read); Mood defaults off (a brief memory scan).
 			ManualMovingStyle = Config.GetValue("ManualSave", "MovingStyle", true);
+			ManualTattoos = Config.GetValue("ManualSave", "Tattoos", true);
+			ManualMood = Config.GetValue("ManualSave", "Mood", false);
 
 			ActiveSlot = Config.GetValue("State", "ActiveSlot", string.Empty);
 			SourceModel = Config.GetValue("State", "SourceModel", string.Empty);
@@ -270,15 +292,16 @@ namespace FreemodeIdentity {
 			// fresh install, and completes a just-migrated one).
 			Config.SetValue("General", "MenuKey", menuKey);
 			Config.SetValue("General", "LogLevel", logLevel.ToString());
+			Config.SetValue("General", "Build", buildOverride);
 			Config.SetValue("Appearance", "Enabled", Enabled);
 			Config.SetValue("Appearance", "ReturnProtagonist", ReturnProtagonist);
 			Config.SetValue("Wallet", "Enabled", walletEnabled);
 			Config.SetValue("Wallet", "Earning", earningEnabled);
 			Config.SetValue("Spoof", "Enabled", spoofEnabled);
 			Config.SetValue("Spoof", "Target", spoofTarget);
+			Config.SetValue("ManualSave", "MovingStyle", ManualMovingStyle);
 			Config.SetValue("ManualSave", "Tattoos", ManualTattoos);
 			Config.SetValue("ManualSave", "Mood", ManualMood);
-			Config.SetValue("ManualSave", "MovingStyle", ManualMovingStyle);
 			Config.SetValue("State", "ActiveSlot", ActiveSlot);
 			Config.SetValue("State", "SourceModel", SourceModel);
 			Config.SetValue("State", "SpoofSourceHash", spoofSourceHash.ToString("X8"));
@@ -315,7 +338,22 @@ namespace FreemodeIdentity {
 				// reachable (the master checkbox is the only way back on). Within Appearance, the
 				// slot controls are additionally greyed mid-snapshot so a re-press can't Apply the
 				// stale pre-capture file or restart the deferred finders.
+				// Close the appearance-switch window only once the swap has FULLY settled — the look
+				// applied and the spoof reached its intended state — so the master toggle can't be
+				// re-pressed until the model swap (and any spoof re-engage) is truly done. A hard
+				// timeout backstop releases it regardless, so a swap that never settles can't lock the
+				// switch off forever.
+				if (appearanceSwitching) {
+					appearanceSwitchTicks++;
+					if (SwitchFullySettled(Game.Player?.Character) || appearanceSwitchTicks >= AppearanceSwitchTimeoutTicks) {
+						appearanceSwitching = false;
+					}
+				}
+
 				bool busy = SnapshotInProgress;
+				// Grey the Appearance master toggle while a switch is in flight so it can't be
+				// re-pressed mid-swap (rapid re-press thrashed SET_PLAYER_MODEL and froze the game).
+				if (EnabledItem != null) EnabledItem.Enabled = !appearanceSwitching;
 				if (AppearanceMenuItem != null) AppearanceMenuItem.Enabled = Enabled;
 				if (WalletMenuItem != null) WalletMenuItem.Enabled = walletEnabled;
 				if (SnapshotItem != null) SnapshotItem.Enabled = !busy;
@@ -331,7 +369,6 @@ namespace FreemodeIdentity {
 				// all are done.
 				if (MoodMemory.IsRunning) { MoodMemory.Tick(); return; }
 				if (PedHeadBlendMemory.FindRunning) { PedHeadBlendMemory.TickFind(); return; }
-				if (DecorationBaseFinder.IsRunning) { DecorationBaseFinder.Tick(); return; }
 				if (SnapshotPending) {
 					Ped pp = Game.Player?.Character;
 					if (pp != null) {
@@ -456,10 +493,18 @@ namespace FreemodeIdentity {
 				// protagonist's own cash); the wallet redirect is an additive layer in SyncShim.
 				// Edit Mode blocks it: the spoof paints the model hash every tick and would fight
 				// external ped edits (intent is kept and re-engages when Edit is turned off).
-				if (spoofEnabled && !EditMode && !spoof.Held && AutoSpoofReady()) {
+				bool retryCooling = autoSpoofRetryMs >= 0 && Game.GameTime - autoSpoofRetryMs < AutoSpoofRetryCooldownMs;
+				if (spoofEnabled && !EditMode && !spoof.Held && !retryCooling && AutoSpoofReady()) {
 					Logger.LogDebug($"Auto-spoof gate ready (current={Identity.Current() ?? "freemode"}) — engaging {spoofTarget}.");
-					if (spoof.Start(spoofTarget)) {
+					// Pass the live ped's real freemode hash so Start can self-heal a stranded poison
+					// (a protagonist hash left on the shared freemode model-info) instead of refusing
+					// every tick — the busy-loop that froze the game on enable.
+					if (spoof.Start(spoofTarget, RealFreemodeHash(player))) {
 						PersistSpoofSource(spoof.OriginalHash);
+						autoSpoofRetryMs = -1;
+					} else {
+						// Engage failed (not ready / unhealable strand). Back off so we don't spin.
+						autoSpoofRetryMs = Game.GameTime;
 					}
 				}
 				spoof.Tick();
@@ -469,6 +514,24 @@ namespace FreemodeIdentity {
 				earning.Tick(walletEnabled && earningEnabled);
 
 				SyncShim();
+
+				// Periodic reminder that Edit Mode is still on while no menu is open (it's silent and
+				// not persisted, easy to forget). Hold off while any menu is open — they're editing —
+				// and reset then so the first reminder lands a full interval after they leave. Fires at
+				// most EditModeReminderMax times, then goes quiet: a longer session is taken as deliberate.
+				if (EditMode && !AnyMenuVisible()) {
+					if (editModeReminderMs < 0) {
+						editModeReminderMs = Game.GameTime;
+					} else if (editModeReminderCount < EditModeReminderMax
+							&& Game.GameTime - editModeReminderMs >= EditModeReminderIntervalMs) {
+						editModeReminderMs = Game.GameTime;
+						editModeReminderCount++;
+						Warn("Edit Mode still on", "- your look isn't being defended. Save and turn it off in the menu.");
+					}
+				} else {
+					editModeReminderMs = -1;
+					editModeReminderCount = 0;
+				}
 
 				if (AnyMenuVisible()) {
 					SyncSpoofItem();
@@ -591,7 +654,11 @@ namespace FreemodeIdentity {
 		}
 
 		PedAppearance.CaptureOptions ManualCaptureOptions() {
-			return new PedAppearance.CaptureOptions { Tattoos = ManualTattoos, MovingStyle = ManualMovingStyle, Mood = ManualMood };
+			// DecorationsSupported is the single kill-switch for tattoos (true on both editions now
+			// that the base resolves by pattern). Kept so a future build that can't resolve can
+			// cleanly disable them without unreadable-set captures.
+			bool tattoos = ManualTattoos && GameBuild.DecorationsSupported;
+			return new PedAppearance.CaptureOptions { Tattoos = tattoos, MovingStyle = ManualMovingStyle, Mood = ManualMood };
 		}
 
 		// Shared snapshot kickoff. Mood + tattoos can't be read synchronously (the facial task
@@ -609,8 +676,14 @@ namespace FreemodeIdentity {
 					MoodMemory.Disable();
 				}
 				PedHeadBlendMemory.BeginFind(player);
+				// Arm the decoration base from the native shim (it scans the live .text — the only way
+				// on Enhanced, whose .text is encrypted) or our own pattern scan (Legacy plaintext).
+				// Both are instant content-free pattern resolves; if neither matches (a future build),
+				// tattoos are simply skipped this snapshot — we never touch the ped's decorations to go
+				// looking, so a miss can't wipe a real tattoo.
 				if (opts.Tattoos && !PedDecorationMemory.BaseKnown) {
-					DecorationBaseFinder.Begin(player, RealPlayerModelHash());
+					shim.TryConnect();
+					DecorationBaseScan.TryArm(shim.DecorationBase);
 				}
 				PendingSlotName = slotName;
 				PendingOptions = opts;
@@ -738,6 +811,24 @@ namespace FreemodeIdentity {
 			}
 		}
 
+		// The live ped's true freemode model hash, for the spoof's stranded-poison self-heal. The
+		// ped's own Model.Hash can't be trusted here (that's exactly what a poison corrupts), so
+		// prefer the model the worn look applied, then the persisted engage-time source, then the
+		// body's gender. Returns 0 if none resolves (heal then declines, leaving the refuse path).
+		uint RealFreemodeHash(Ped ped) {
+			AppearanceData worn = WornLook ?? (XmlAppearanceStorage.Exists(ActiveSlot) ? XmlAppearanceStorage.Get(ActiveSlot) : null);
+			if (worn != null && !string.IsNullOrEmpty(worn.Model)) {
+				uint h = unchecked((uint)new Model(worn.Model).Hash);
+				if (PedAppearance.IsFreemodeHash(unchecked((int)h))) return h;
+			}
+			if (PedAppearance.IsFreemodeHash(unchecked((int)spoofSourceHash))) return spoofSourceHash;
+			if (ped != null && ped.Exists()) {
+				string model = ped.Gender == Gender.Female ? PedAppearance.FemaleModel : PedAppearance.MaleModel;
+				return unchecked((uint)new Model(model).Hash);
+			}
+			return 0;
+		}
+
 		// Record the live story protagonist as the "original" to return to on Disable. No-ops once
 		// captured / while the body is freemode (incl. a spoof painting a protagonist hash — that
 		// reading is OURS, not real, and PlayerIdentity sees through it from the live body).
@@ -751,10 +842,26 @@ namespace FreemodeIdentity {
 			Logger.Log($"Captured source protagonist model={SourceModel}.");
 		}
 
+		// True from the moment an Appearance toggle starts a model swap until that swap has settled.
+		// Each flip does a blocking SET_PLAYER_MODEL (apply a freemode look, or swap back to the
+		// protagonist) that destroys + recreates the player ped; flipping again before it settles
+		// thrashed the swap and eventually FROZE the game (observed: ~6 enable/disable cycles in 12s
+		// deadlocked the streamer). While this is set, the Appearance checkbox is greyed in OnTick so
+		// the switch can't be re-pressed mid-swap. Cleared once the auto-apply settles (OnTick) or the
+		// disable's return swap finishes.
+		bool appearanceSwitching;
+
 		// Appearance master toggle. Enable applies the active freemode look; Disable swaps back
 		// to the story protagonist.
 		void SetEnabled(bool on) {
 			if (on == Enabled) return;
+			// A switch is still in flight. Greying the item only dims it — LemonUI still flips Checked
+			// and fires this on a press — so we must REVERT the checkbox to the real state and bail,
+			// or the box desyncs from Enabled and the mismatch drives an apply/return loop.
+			if (appearanceSwitching) {
+				if (EnabledItem != null) EnabledItem.Checked = Enabled;
+				return;
+			}
 
 			// Disabling swaps the player to a genuine protagonist, which a held spoof can't sit on
 			// (Spoof.Tick auto-releases on the model change, and re-engage is gated on a freemode
@@ -798,10 +905,51 @@ namespace FreemodeIdentity {
 					Warn("No active slot", "- set one to apply a saved look.");
 					return;
 				}
+				BeginAppearanceSwitch();
 				ApplySlot(ActiveSlot);
 			} else {
+				BeginAppearanceSwitch();
 				ReturnToSourceProtagonist(spoofedIdentity);
 			}
+		}
+
+		// Open the switching window: grey the toggle (OnTick) until the swap fully settles. The
+		// blocking SET_PLAYER_MODEL has already returned by the time we get here; the window covers
+		// the FOLLOWING ticks where the new ped is still settling (and the spoof may be re-engaging),
+		// which is when a re-press used to thrash the swap.
+		//
+		// Re-arm the settle gate (AutoApplyDone + the spoof settle counter) so SwitchFullySettled
+		// measures THIS swap, not the previous one. Without this the gate reads the stale AutoApplyDone
+		// left true by the last settled apply and releases the lock on the very first tick — which let
+		// a fast re-press through again. Re-arming forces auto-apply to re-land and the spoof to
+		// re-reach intent before the toggle frees up.
+		void BeginAppearanceSwitch() {
+			appearanceSwitching = true;
+			appearanceSwitchTicks = 0;
+			AutoApplyDone = false;
+			SettleTicks = 0;
+			spoofSettleTicks = 0;
+		}
+		int appearanceSwitchTicks;
+		const int AppearanceSwitchTimeoutTicks = 600; // ~10s hard backstop so the toggle can't lock off
+
+		// The appearance switch is FULLY settled — safe to re-enable the master toggle — when the
+		// screen is faded in, the auto-apply has landed (AutoApplyDone), AND the spoof has reached its
+		// intended state: not wanted, or actually held, or we're disabled and standing on a genuine
+		// protagonist (where it correctly can't engage). Deliberately does NOT wait out the 4s reapply
+		// COOLDOWN — that exists only to stop the clobber path re-firing on a fresh swap, not as a
+		// settle signal; gating the button on it made the toggle feel locked for several seconds. All
+		// signals are concrete/honest (no per-frame head-blend native in the steady path).
+		bool SwitchFullySettled(Ped player) {
+			if (!GTA.UI.Screen.IsFadedIn) return false;
+			if (Enabled) {
+				if (!AutoApplyDone) return false;
+				// Spoof must have reached intent: off, or actually engaged.
+				if (spoofEnabled && !EditMode && !spoof.Held) return false;
+				return true;
+			}
+			// Disabled: settled once we're back on a genuine protagonist body (the return swap landed).
+			return PlayerIdentity.GenuineProtagonist(player, spoof) != null;
 		}
 
 		// Wallet master toggle. Off makes the wallet inert: earning and the shop spend-redirect
@@ -977,7 +1125,20 @@ namespace FreemodeIdentity {
 				lastSubtitle = subtitle;
 				MainMenu.Name = subtitle;
 			}
+
+			// Mirror the active slot into the Appearance submenu's header (blue, like the main menu)
+			// so the hub shows what's active without dropping back out. Only while it's open, and only
+			// on change. KeepNameCasing on AppearanceMenu preserves the lowercase ~b~ colour codes.
+			if (AppearanceMenu.Visible) {
+				string active = string.IsNullOrEmpty(ActiveSlot) ? "no active slot" : ActiveSlot;
+				string appSubtitle = $"~b~{active}~s~";
+				if (appSubtitle != lastAppearanceSubtitle) {
+					lastAppearanceSubtitle = appSubtitle;
+					AppearanceMenu.Name = appSubtitle;
+				}
+			}
 		}
+		string lastAppearanceSubtitle;
 
 		// The spoof checkbox reflects persisted INTENT, not the live hold (which drops
 		// transiently on a model change and re-engages on its own).
@@ -990,8 +1151,24 @@ namespace FreemodeIdentity {
 		// Grey out the Spoofing items while the player is a GENUINE protagonist — engaging
 		// there is blocked (would hijack real money). PlayerIdentity sees through our own spoof
 		// from the live body, so a spoofed freemode ped is never mistaken for a real protagonist.
+		//
+		// Recomputed ONLY when the player ped/model changes, not every visible frame. The
+		// genuine-vs-freemode tell is the live head blend (GET_PED_HEAD_BLEND_DATA), and on Legacy
+		// that native returns mix values for a settled protagonist that drift in and out of the
+		// in-range check frame-to-frame — polling it per frame flipped the items' Enabled state and
+		// the menu flickered. A protagonist↔freemode change always moves the ped handle or model
+		// hash, so keying off those catches every real transition while killing the per-frame churn.
+		int spoofAvailPed = -1;
+		int spoofAvailModel;
 		void RefreshSpoofAvailability() {
-			string genuine = PlayerIdentity.GenuineProtagonist(Game.Player?.Character, spoof);
+			Ped ped = Game.Player?.Character;
+			int pedHandle = ped?.Handle ?? 0;
+			int modelHash = ped?.Model.Hash ?? 0;
+			if (pedHandle == spoofAvailPed && modelHash == spoofAvailModel) return;
+			spoofAvailPed = pedHandle;
+			spoofAvailModel = modelHash;
+
+			string genuine = PlayerIdentity.GenuineProtagonist(ped, spoof);
 			bool available = genuine == null;
 			if (SpoofMenuItem.Enabled != available) SpoofMenuItem.Enabled = available;
 			if (SpoofItem.Enabled != available) SpoofItem.Enabled = available;
@@ -1061,6 +1238,7 @@ namespace FreemodeIdentity {
 
 		void BuildAppearanceMenu() {
 			AppearanceMenu = new NativeMenu("Appearance", "Appearance");
+			AppearanceMenu.KeepNameCasing = true; // keep the ~b~ active-slot colour codes lowercase (set live in RefreshSubtitle)
 			Pool.Add(AppearanceMenu);
 			AppearanceMenuItem = MainMenu.AddSubMenu(AppearanceMenu);
 			AppearanceMenuItem.Description = "Save, apply and auto-apply your freemode look.";
@@ -1083,11 +1261,13 @@ namespace FreemodeIdentity {
 				+ "change your ped freely. Save when you are done, then turn this off.",
 				EditMode);
 
+			// Gallery-first: Saved Appearances (the hub - set active, apply, back up) on top, then the
+			// one-shot actions, then the capture/edit toggles.
+			SlotsMenuItem = AppearanceMenu.AddSubMenu(SlotsMenu);
+			SlotsMenuItem.Description = "Apply, set active, overwrite, back up, rename or delete a saved appearance.";
 			AppearanceMenu.Add(SnapshotItem);
 			AppearanceMenu.Add(OverwriteActiveItem);
 			AppearanceMenu.Add(ApplyActiveItem);
-			SlotsMenuItem = AppearanceMenu.AddSubMenu(SlotsMenu);
-			SlotsMenuItem.Description = "Apply, set active, overwrite, back up, rename or delete a saved appearance.";
 			BuildManualMenu(AppearanceMenu);
 			AppearanceMenu.Add(EditModeItem);
 
@@ -1279,17 +1459,19 @@ namespace FreemodeIdentity {
 			ManualMenuItem = parent.AddSubMenu(ManualMenu);
 			ManualMenuItem.Description = "Which features a manual Save to New Slot / Overwrite captures.";
 
-			ManualTattoosItem = new NativeCheckboxItem("Save Tattoos",
-				"Tattoos/decals. ~o~Heavy~s~ memory sweep - on only if this character has tattoos.",
-				ManualTattoos);
-			ManualMoodItem = new NativeCheckboxItem("Save Mood",
-				"Facial mood. ~y~Medium~s~ - a brief memory scan.", ManualMood);
+			// Ordered light-first, the one heavier option last. Moving Style and Tattoos are both a
+			// quick read now (the decoration base resolves by a single pattern scan, no sweep); Mood
+			// still does a brief memory scan, so it sits at the bottom.
 			ManualMovingStyleItem = new NativeCheckboxItem("Save Moving Style",
 				"Walk clipset. ~g~Light~s~ - a quick read.", ManualMovingStyle);
+			ManualTattoosItem = new NativeCheckboxItem("Save Tattoos",
+				"Tattoos/decals. ~g~Light~s~ - a quick read.", ManualTattoos);
+			ManualMoodItem = new NativeCheckboxItem("Save Mood",
+				"Facial mood. ~y~Medium~s~ - a brief memory scan.", ManualMood);
 
+			ManualMenu.Add(ManualMovingStyleItem);
 			ManualMenu.Add(ManualTattoosItem);
 			ManualMenu.Add(ManualMoodItem);
-			ManualMenu.Add(ManualMovingStyleItem);
 
 			ManualTattoosItem.CheckboxChanged += (s, a) => {
 				ManualTattoos = ManualTattoosItem.Checked;

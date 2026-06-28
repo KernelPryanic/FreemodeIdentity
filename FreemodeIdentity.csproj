@@ -58,6 +58,7 @@
     <Compile Include="Properties\AssemblyInfo.cs" />
     <!-- Shared helpers (one copy each, deduped from AK + FW). -->
     <Compile Include="ScriptPaths.cs" />
+    <Compile Include="GameBuild.cs" />
     <Compile Include="MemScan.cs" />
     <Compile Include="Joaat.cs" />
     <!-- Appearance engine (from AppearanceKeeper). -->
@@ -68,7 +69,7 @@
     <Compile Include="MoodMemory.cs" />
     <Compile Include="MovingStyleMemory.cs" />
     <Compile Include="PedDecorationMemory.cs" />
-    <Compile Include="DecorationBaseFinder.cs" />
+    <Compile Include="DecorationBaseScan.cs" />
     <Compile Include="FacialMoods.cs" />
     <Compile Include="MovingStyles.cs" />
     <!-- Wallet / spoof engine (from FreemodeWallet). -->

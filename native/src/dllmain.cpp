@@ -1,3 +1,4 @@
+#include "build_edition.hpp"
 #include "logger.hpp"
 #include "shared_state.hpp"
 #include "wallet_hook.hpp"
@@ -28,7 +29,7 @@ void ScriptMain() {
 		if (++waited % 500 == 0)
 			Logger::Logf("shim: waiting for world... (%d ticks)", waited);
 	}
-	Logger::Log("shim: world ready — installing hooks.");
+	Logger::Logf("shim: world ready (%s edition) — installing hooks.", BuildEdition::Name());
 	g_hooksInstalled = WalletHook::Install();
 
 	// Nothing per-frame: the redirect lives entirely in the STAT hooks, driven by the

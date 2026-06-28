@@ -26,7 +26,7 @@ namespace FreemodeIdentity {
 	// any hop is unreadable the read aborts and returns null — a bad read never corrupts a
 	// snapshot.
 	static class MovingStyleMemory {
-		const int PedIntelligenceOffset = 0x10A0;
+		const int PedIntelligenceOffset = GameBuild.PedIntelligenceOffset; // 0x10A0 on both builds
 		// Pointer hops from the intelligence object to the motion-task block, then the field
 		// offset of the clipset hash within it. Verified cross-restart (see class header).
 		static readonly int[] Chain = { 0x388, 0x20 };

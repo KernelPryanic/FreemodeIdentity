@@ -57,7 +57,12 @@ namespace FreemodeIdentity {
 		// in traversal). 1500 nearly clipped that, so the cap is 3000 for safe margin; the cheap
 		// overlay pre-filter makes each block fast, so a higher cap costs little when the ped is found
 		// early and only matters in the rare deep case.
-		const int MaxHops = 4;
+		// 6 hops, not 4: on Legacy the CPedHeadBlendData hangs DEEPER in the ped's pointer graph
+		// (found at 5-6 hops; the 4-hop walk never reached it and the face silently fell back to
+		// defaults). Enhanced reaches it earlier, so the extra hops are harmless there — they only
+		// matter if the early hops miss. Block cap stays 3000 (Legacy finds it at ~177, Enhanced
+		// within ~1500), CPU-independent.
+		const int MaxHops = 6;
 		const int MaxFindBlocks = 3000;
 
 		static bool Initialized;
@@ -124,11 +129,11 @@ namespace FreemodeIdentity {
 		static IntPtr cachedMix;
 
 		// The struct bytes captured AT FIND TIME. Critical: between locating the struct and the
-		// deferred DoSnapshot/TryFill, the tattoo DecorationBaseFinder adds+removes a sentinel
-		// decoration, which churns the ped and can RELOCATE the head-blend struct — so the found
-		// address is stale by the time TryFill reads it (observed: "mix anchor mismatch" 5s later).
-		// We snapshot the struct the instant we find it (the user isn't editing mid-save, so the
-		// contents are final) and TryFill consumes THIS buffer, immune to the later relocation.
+		// deferred DoSnapshot/TryFill the ped can churn (a spoof re-engage / model-info write can
+		// RELOCATE the head-blend struct), so the found address may be stale by the time TryFill
+		// reads it (observed: "mix anchor mismatch" 5s later). We snapshot the struct the instant we
+		// find it (the user isn't editing mid-save, so the contents are final) and TryFill consumes
+		// THIS buffer, immune to the later relocation.
 		static byte[] foundStruct;
 
 		public static bool FindRunning => findRunning;
@@ -212,7 +217,7 @@ namespace FreemodeIdentity {
 			findPed = ped.MemoryAddress.ToInt64();
 			if (cachedPed == findPed && cachedMix != IntPtr.Zero && MixMatches(cachedMix)) {
 				mixResult = cachedMix; // cache hit — reuse, no walk
-				// Snapshot now, before any later ped churn (e.g. the tattoo sweep) can relocate it.
+				// Snapshot now, before any later ped churn (e.g. the tattoo capture) can relocate it.
 				foundStruct = MemScan.Snapshot(cachedMix, StructSpan);
 				findRunning = false;
 				Logger.Log($"PedHeadBlendMemory: mix cache HIT (mix={cachedMix.ToInt64():X}).");
@@ -220,10 +225,10 @@ namespace FreemodeIdentity {
 			}
 			Logger.Log($"PedHeadBlendMemory: mix cache MISS (heritage={findShape},{findSkin},{findThird}) — walking graph.");
 			findBlocks = 0;
-			// Tight block cap: the CPedHeadBlendData mix-start is reached EARLY in the walk (found
-			// at 128-330 blocks across runs), so 1500 has comfortable margin while bailing the
-			// not-found case (e.g. a non-freemode ped slipping through) fast instead of grinding the
-			// default 4000. Block-count, so it behaves identically on slow CPUs.
+			// Tight block cap: the mix-start is reached EARLY once the hop depth is right (Enhanced
+			// 128-330, Legacy ~177), so 3000 is comfortable margin while bailing the not-found case
+			// (e.g. a non-freemode ped slipping through) fast. Block-count, so it behaves identically
+			// on slow CPUs. (The earlier Legacy "not found" was a HOP-depth shortfall, not this cap.)
 			findWalker = MemScan.WalkPointerGraph(ped.MemoryAddress, MaxHops, MaxFindBlocks).GetEnumerator();
 			return true;
 		}
@@ -334,7 +339,7 @@ namespace FreemodeIdentity {
 							mixResult = cand;
 							cachedPed = findPed;   // cache for cheap reuse on later snapshots
 							cachedMix = mixResult;
-							// Snapshot the struct NOW. The deferred decoration sweep that runs after this
+							// Snapshot the struct NOW. The deferred decoration capture that runs after this
 							// find churns the ped and can relocate the struct, so reading it later (in
 							// TryFill) would hit a stale address. Capture the final bytes here instead.
 							foundStruct = MemScan.Snapshot(cand, StructSpan);
@@ -372,7 +377,7 @@ namespace FreemodeIdentity {
 			}
 
 			// Consume the struct bytes snapshotted AT FIND TIME (TickFind/BeginFind), not the live
-			// address: the deferred tattoo sweep that runs between find and here churns the ped and
+			// address: the deferred tattoo capture that runs between find and here churns the ped and
 			// can relocate the struct, so re-reading MixResult now would hit stale memory (that was
 			// the "mix anchor mismatch" 5s later). The find-time bytes are the ped's final state for
 			// this save — the user isn't editing mid-snapshot.

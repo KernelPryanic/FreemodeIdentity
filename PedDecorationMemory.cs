@@ -19,26 +19,25 @@ namespace FreemodeIdentity {
 	//   OverlayEntry (size 0x14): uint32 collectionHash @ +0, uint32 overlayHash @ +4
 	//   CPed index: uint16 buffer-index @ ped + 0x2E8 (Enhanced; pinned across three probe runs).
 	//
-	// The array BASE is a page-aligned global allocation whose address CHANGES every launch, so
-	// it can't be a constant and is too expensive to scan for inline (a full sweep froze the
-	// game). DecorationBaseFinder discovers it ONCE per session in a tick-driven background pass
-	// (anchored on a unique sentinel decoration) and hands it here via SetBase. TryFill is then a
-	// pure, instant read — so Capture() stays synchronous. Until the base is set, TryFill returns
-	// false (tattoos uncaptured; apply then won't clear them).
+	// The array BASE is a page-aligned global allocation whose address CHANGES every launch, so it
+	// can't be a constant. DecorationBaseScan resolves it ONCE per session by pattern (the native
+	// shim scans the decrypted .text on Enhanced; Game.FindPattern on Legacy) and hands it here via
+	// SetBase. TryFill is then a pure, instant read — so Capture() stays synchronous. Until the base
+	// is set, TryFill returns false (tattoos uncaptured; apply then won't clear them).
 	static class PedDecorationMemory {
-		public const int PedBufferIndexOffset = 0x2E8;
+		// CPed buffer-index offset, sourced from GameBuild (0x2E8 on both builds).
+		public static int PedBufferIndexOffset => GameBuild.PedDecorationBufferIndexOffset;
 		public const int PedEntryStride = 0x7D8;
 		public const int EntriesOffset = 0xB8;
 		public const int CountOffset = 0x784;
 		public const int OverlayStride = 0x14;
 		public const int MaxOverlays = 87;
 
-		// The session's decoration array base (address of PedEntry[0]), set once by
-		// DecorationBaseFinder. IntPtr.Zero until discovered. PROVEN session-GLOBAL and stable: the
-		// probe read the SAME base (2468E8A0000) for two different peds across a model switch (female
-		// idx=5, male idx=2). It is ONE global PedEntry[] array; each ped owns a slot whose index lives
-		// at ped+0x2E8 and varies per ped. So the base never goes stale — only the index does, and
-		// TryFill reads that fresh every call. entry = base + index*stride.
+		// The session's decoration array base (address of PedEntry[0]), set once by DecorationBaseScan.
+		// IntPtr.Zero until resolved. PROVEN session-GLOBAL and stable: it is ONE global PedEntry[]
+		// array; each ped owns a slot whose index lives at ped+0x2E8 and varies per ped. So the base
+		// never goes stale — only the index does, and TryFill reads that fresh every call.
+		// entry = base + index*stride.
 		static IntPtr arrayBase = IntPtr.Zero;
 
 		public static bool BaseKnown => arrayBase != IntPtr.Zero;

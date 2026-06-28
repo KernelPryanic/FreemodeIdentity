@@ -1,7 +1,10 @@
 #include "wallet_hook.hpp"
 
+#include "build_edition.hpp"
+#include "decoration.hpp"
 #include "logger.hpp"
 #include "natives.hpp"
+#include "natives_legacy.hpp"
 #include "rage.hpp"
 #include "shared_state.hpp"
 
@@ -13,18 +16,20 @@
 
 namespace {
 
-// Translated (build-specific) hashes for handler RESOLUTION on Enhanced. The stable
-// hash maps to the "unknown native" stub; these are from YimMenuV2 crossmap.txt for
-// build 1013.34. ScriptHookV's invoke<> still uses the stable hash — these are ONLY for
-// Natives::GetHandler / InitNativeTables.
-//   stable 0xB3271D7AB655B441 (STAT_SET_INT) -> 0x1164A75E490C27B6
-//   stable 0x767FBC2AC802EF3D (STAT_GET_INT) -> 0xDF7F16323520B858
+// TRANSLATED (build-specific) native hashes — the registration table is keyed by these on
+// BOTH editions, not the stable documented hashes. RAGE shuffles native hashes per build; the
+// stable hash (e.g. STAT_SET_INT 0xB3271D7AB655B441) is mapped through a crossmap to the
+// build's hash before any lookup. These values come from FiveM CrossMapping_Universal.h column
+// 27 — the frozen post-b2944 Legacy column, which b3788 uses, and ALSO the Enhanced ~1013.34
+// values (the two builds share this column). So one pair serves both editions here.
+//   stable 0xB3271D7AB655B441 (STAT_SET_INT) -> 0x1164A75E490C27B6  (bucket 0xB6)
+//   stable 0x767FBC2AC802EF3D (STAT_GET_INT) -> 0xDF7F16323520B858  (bucket 0x58)
 constexpr uint64_t XHASH_STAT_SET_INT = 0x1164A75E490C27B6;
 constexpr uint64_t XHASH_STAT_GET_INT = 0xDF7F16323520B858;
 
 // The shared bridge block. C# resolves its address (export below) and drives
 // redirectEnabled / activeStat / balance; the hooks read it. C# is the authority.
-FreemodeWalletState g_state = { FREEMODE_WALLET_STATE_VERSION, 0, 0, 0, 0, 0 };
+FreemodeWalletState g_state = { FREEMODE_WALLET_STATE_VERSION, 0, 0, 0, 0, 0, 0 };
 
 rage::scrNativeHandler g_origStatSetInt = nullptr;
 rage::scrNativeHandler g_origStatGetInt = nullptr;
@@ -146,7 +151,8 @@ void HookStatGetInt(rage::scrNativeCallContext* ctx) {
 
 // Native handlers on Enhanced are short thunks that jmp to the real body; MinHook can't
 // relocate those (MH_ERROR_UNSUPPORTED_FUNCTION). Follow a leading jmp. Handles E9
-// (rel32) and FF 25 (jmp qword [rip+disp32]).
+// (rel32) and FF 25 (jmp qword [rip+disp32]). Legacy handlers are direct functions, so this
+// is a no-op there (the leading byte won't be a jmp).
 void* ResolveThunk(void* fn) {
 	uint8_t* p = reinterpret_cast<uint8_t*>(fn);
 	if (p[0] == 0xE9) {
@@ -160,13 +166,23 @@ void* ResolveThunk(void* fn) {
 	return fn;
 }
 
+// Resolve a native handler for the running edition. Both editions key on the SAME translated
+// hash (XHASH_*); only the resolver differs — Legacy walks the scrNativeRegistration table,
+// Enhanced uses the InitNativeTables trick.
+rage::scrNativeHandler ResolveHandler(uint64_t hash) {
+	return BuildEdition::IsLegacy() ? NativesLegacy::GetHandler(hash) : Natives::GetHandler(hash);
+}
+
 bool InstallOne(uint64_t hash, void* detour, void** trampoline, const char* name) {
-	rage::scrNativeHandler handler = Natives::GetHandler(hash);
+	rage::scrNativeHandler handler = ResolveHandler(hash);
 	if (!handler) {
 		Logger::Logf("shim: could not resolve handler for %s (%016llX)", name, hash);
 		return false;
 	}
-	void* target = ResolveThunk(reinterpret_cast<void*>(handler));
+	// Legacy handlers are direct functions; Enhanced ones are jmp thunks MinHook can't relocate.
+	void* target = BuildEdition::IsLegacy()
+	                   ? reinterpret_cast<void*>(handler)
+	                   : ResolveThunk(reinterpret_cast<void*>(handler));
 	if (MH_CreateHook(target, detour, trampoline) != MH_OK) {
 		Logger::Logf("shim: MH_CreateHook(%s) failed", name);
 		return false;
@@ -197,7 +213,17 @@ bool Install() {
 		g_installed = true;
 		return true; // hooks from the first install are still in place; nothing to redo
 	}
-	if (!Natives::Init())
+	Logger::Logf("shim: detected %s edition — using its native-resolution path.", BuildEdition::Name());
+
+	// Resolve the ped-decoration array base from the live .text and publish it for C#. Independent
+	// of the STAT hooks (it needs no MinHook) — a wallet-hook failure below must not lose it, and
+	// even with the wallet off C# wants it for tattoo capture. 0 just means C# skips tattoos.
+	g_state.decorationBase = Decoration::ResolveArrayBase();
+
+	// Legacy: scrNativeRegistration table walk. Enhanced: the InitNativeTables resolver. Both
+	// editions key on the SAME translated hashes (XHASH_*) — they share crossmap column 27.
+	bool resolverReady = BuildEdition::IsLegacy() ? NativesLegacy::Init() : Natives::Init();
+	if (!resolverReady)
 		return false; // pattern miss already logged; fail safe
 
 	bool ok = true;

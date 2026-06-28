@@ -4,6 +4,9 @@ A GTA V single-player mod (ScriptHookV .NET / SHVDN3) that lets a **freemode
 (multiplayer) character live in story mode as a real character** - it keeps the
 look you authored and gives that look a spendable wallet so shops and money work.
 
+Runs on **both GTA V Enhanced and Legacy** from one build - it detects the edition at
+startup and adapts (override with `[General] Build` if needed).
+
 It merges two jobs into one mod:
 
 - **Appearance** - snapshot your freemode ped's look into named slots and re-apply
@@ -58,7 +61,7 @@ changes (the shop pokes a cash mirror the game reverts), so the wallet redirect 
 makes money real.
 
 Because the wallet rides the protagonist's own cash stat, the rest of the game reads it
-as real money: **ATMs and the pause menu show the right balance**, and external job mods
+as real money: **ATMs show the right balance**, and external job mods
 pay into and charge it correctly. Tested with
 [Casual Jobs (Rabbit Holes)](https://www.gta5-mods.com/scripts/casual-jobs-rabbit-holes) -
 job payouts land in the wallet while spoofed.
@@ -67,11 +70,11 @@ job payouts land in the wallet while spoofed.
 
 1. Requires [ScriptHookV](http://www.dev-c.com/gtav/scripthookv/) and
    [ScriptHookV .NET (SHVDN3)](https://github.com/scripthookvdotnet/scripthookvdotnet/)
-   with LemonUI.
+   with LemonUI - the build matching your edition (Enhanced or Legacy).
 2. Copy `FreemodeIdentity.dll` into your `GTA V/scripts/` folder.
-3. Copy `FreemodeIdentity.asi` into the game root (next to `GTA5_Enhanced.exe`).
-   Without it, appearance still works and the wallet still earns - only shop spending
-   won't redirect.
+3. Copy `FreemodeIdentity.asi` into the game root (next to the game exe -
+   `GTA5_Enhanced.exe` or `GTA5.exe`). Without it, appearance still works and the wallet
+   still earns - only shop spending won't redirect.
 4. Launch the game (or reload scripts).
 
 ## Use
@@ -99,8 +102,9 @@ Submenus:
     Backup**, **Rename**, **Delete**. Backup copies the slot's saved data aside; Apply
     from Backup restores that copy without touching the slot - a safety net around
     Overwrite. Delete removes the backup too.
-  - **Manual Save ▸** - per-feature toggles (Tattoos, Mood, Moving Style) gating the
-    heavier scans. Tattoos and Mood are **off by default**.
+  - **Manual Save ▸** - per-feature toggles (Moving Style, Tattoos, Mood) gating the
+    memory reads. Moving Style and Tattoos are quick reads and **on by default**; Mood is a
+    brief scan and **off by default**.
   - **Edit Mode** - pauses the re-apply and drops the spoof so an external tool (Menyoo)
     can change the ped freely. Save your look, then turn it off.
 - **Wallet ▸** - **Pickups Enabled** (credit collected cash pickups).
@@ -113,8 +117,8 @@ story money) - switch to a freemode ped first.
 ## Files
 
 Slots, config and logs live **outside** the game folder, under
-`%APPDATA%\GTA V Mods\KernelPryanic\FreemodeIdentity\` (the game locks files written
-under the game tree at launch, so that location stays writable):
+`%APPDATA%\GTA V Mods\KernelPryanic\FreemodeIdentity\` (Enhanced locks files written
+under the game tree at launch; this location stays writable on both editions):
 
 - `Appearances\<name>.xml` - one file per slot (`<name>.bak.xml` is its backup)
 - `FreemodeIdentity.ini` - config
@@ -123,22 +127,43 @@ under the game tree at launch, so that location stays writable):
 
 ## Config (`FreemodeIdentity.ini`)
 
-Most settings are set through the menu; the keys are also editable by hand. Grouped by
-feature, with non-user runtime state isolated in `[State]`:
+Most settings are set through the menu; the keys are also editable by hand. A fresh
+install writes the file with every key at its default, grouped by feature with non-user
+runtime state isolated in `[State]`. The full layout, with the values each key accepts:
 
-| Section / Key                            | Default    | Meaning                              |
-| ---------------------------------------- | ---------- | ------------------------------------ |
-| `[General] MenuKey`                      | `Shift, X` | Key that toggles the menu            |
-| `[General] LogLevel`                     | `Debug`    | Log verbosity (Info/Debug/Error)     |
-| `[Appearance] Enabled`                   | `True`     | Wear and defend the active look      |
-| `[Appearance] ReturnProtagonist`         | `player_zero` | Fallback character to return to   |
-| `[Wallet] Enabled` / `Earning`           | `True` / `True` | Wallet redirect / pickup earning |
-| `[Spoof] Enabled` / `Target`             | `False` / `Franklin` | Disguise on / protagonist   |
-| `[ManualSave] Tattoos/Mood/MovingStyle`  | `False`/`False`/`True` | Features captured on save |
-| `[State] …`                              | -          | Runtime state - don't edit by hand   |
+```ini
+[General]
+MenuKey = Shift, X        ; any key + optional Shift/Control/Alt, e.g. F9  or  Control, M
+LogLevel = Debug          ; Info | Debug | Error
+Build = Auto              ; Auto | Enhanced | Legacy   (Auto detects from the running exe)
+
+[Appearance]
+Enabled = True            ; True | False  - wear and defend the active look on load
+ReturnProtagonist = player_zero  ; player_zero (Michael) | player_one (Franklin) | player_two (Trevor)
+
+[Wallet]
+Enabled = True            ; True | False  - route shop charges to the wallet while spoofing
+Earning = True            ; True | False  - credit collected cash pickups
+
+[Spoof]
+Enabled = False           ; True | False  - read as a protagonist so shops open
+Target = Franklin         ; Michael | Franklin | Trevor
+
+[ManualSave]
+MovingStyle = True        ; True | False  - capture walk clipset on Save (light read)
+Tattoos = True            ; True | False  - capture tattoos/decals on Save (light read)
+Mood = False              ; True | False  - capture facial mood on Save (brief memory scan)
+
+[State]
+; Runtime state the mod manages - don't edit by hand.
+```
 
 `LogLevel` defaults to `Debug` during the 0.x pre-releases so bug reports carry full
 detail; it logs nothing per frame, so the file stays small.
+
+`Build` auto-detects the game edition (Enhanced vs Legacy) from the running executable;
+set it to `Enhanced` or `Legacy` only to override a misdetection. The startup log records
+the resolved edition.
 
 ## Build
 

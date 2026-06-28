@@ -17,7 +17,9 @@
 // sides — a field added here but not in the C# mirror is the classic "spend didn't register"
 // bug.
 //
-// All ints, 4-byte, naturally packed. Version guards an accidental layout mismatch.
+// Ints are 4-byte; decorationBase is an 8-byte pointer placed LAST and 8-aligned (the six int32s
+// before it are an even count, so it lands on an 8-byte boundary with no padding). Version guards an
+// accidental layout mismatch.
 struct FreemodeWalletState {
 	int32_t version;          // = STATE_VERSION; C# checks it before trusting the block
 	int32_t redirectEnabled;  // C# -> shim: 1 = redirect the active wallet stat to us
@@ -25,6 +27,7 @@ struct FreemodeWalletState {
 	int32_t balance;          // C# -> shim: the live wallet total the shim mirrors + reports
 	int32_t pendingDelta;     // shim -> C#: accumulated signed change (debit<0/income>0); C# zeroes it
 	int32_t logLevel;         // C# -> shim: log verbosity (0 = Info, 1 = Debug); ini [Logging] Level
+	uint64_t decorationBase;  // shim -> C#: ped-decoration array base resolved by .text scan (0 = none)
 };
 
-constexpr int32_t FREEMODE_WALLET_STATE_VERSION = 1;
+constexpr int32_t FREEMODE_WALLET_STATE_VERSION = 2;

@@ -407,6 +407,13 @@ namespace FreemodeIdentity {
 		// ---- Tattoos / decals --------------------------------------------------
 
 		public static void ApplyDecorations(Ped ped, AppearanceData ad) {
+			// Builds without decoration support (Legacy, until the offset is probed) must NOT touch
+			// decorations at all. A slot saved on Enhanced carries decoration hashes that don't
+			// resolve here; clearing + re-adding them corrupts the rest of the look. Skipping leaves
+			// the captured face/hair/clothing intact and just omits tattoos.
+			if (!GameBuild.DecorationsSupported) {
+				return;
+			}
 			// Only touch decorations if we actually captured the set. A snapshot taken
 			// before the decoration memory read was available carries an empty list with
 			// DecorationsFromMemory == false; clearing then would wipe the player's
@@ -426,8 +433,8 @@ namespace FreemodeIdentity {
 		public static void CaptureDecorations(Ped ped, AppearanceData ad, bool capture) {
 			// No native enumerates a ped's applied decorations (GET_PED_DECORATIONS_STATE is only a
 			// whole-set checksum), so tattoos are read from the decoration array in memory
-			// (PedDecorationMemory). That read needs the array base, which is discovered once per
-			// session by DecorationBaseFinder (the user enables it from the menu). Until the base is
+			// (PedDecorationMemory). That read needs the array base, which is resolved once per
+			// session by DecorationBaseScan (a pattern resolve). Until the base is
 			// known, TryFill returns false → Decorations empty + DecorationsFromMemory false, so
 			// apply leaves the ped's tattoos untouched. The read is fully VirtualQuery-gated and the
 			// base is re-validated each call, so it can't fault on a stale/wrong base.

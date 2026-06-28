@@ -30,7 +30,10 @@ add_library(FreemodeIdentity SHARED
 	src/dllmain.cpp
 	src/logger.cpp
 	src/pattern.cpp
+	src/build_edition.cpp
+	src/decoration.cpp
 	src/natives.cpp
+	src/natives_legacy.cpp
 	src/wallet_hook.cpp
 )
 

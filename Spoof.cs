@@ -22,7 +22,9 @@ namespace FreemodeIdentity {
 	internal sealed class Spoof {
 		const int ArchetypeOffset = 0x20;
 		const int HashOffset = 0x18;
-		const int CharIndexGlobal = 0x547B; // SP active-character index (g21627)
+		// SP active-character index global (lever 2). Enhanced: 0x547B (g21627). Legacy has no
+		// clean equivalent, so GameBuild returns -1 there and lever 2 is skipped — see GameBuild.
+		static int CharIndexGlobal => GameBuild.CharIndexGlobal;
 
 		[System.Runtime.InteropServices.DllImport("ScriptHookV.dll", ExactSpelling = true, EntryPoint = "?getGlobalPtr@@YAPEA_KH@Z")]
 		static extern IntPtr GetGlobalPtr(int index);
@@ -91,7 +93,15 @@ namespace FreemodeIdentity {
 		// Engage the spoof, making the player read as `identity` (a protagonist). Returns
 		// false (and changes nothing) if it can't take hold — already a protagonist, no ped,
 		// unwritable memory. Re-entrant safe: a second call while held is a no-op.
-		public bool Start(string identity) {
+		//
+		// realFreemodeHash (0 = none) is the player's TRUE freemode model, used to SELF-HEAL a
+		// stranded poison: on Legacy a prior spoof's restore can leave a protagonist hash on the
+		// SHARED freemode model-info, so a genuine freemode body reads that protagonist hash. Left
+		// unhandled, Start refuses every tick ("not a freemode model") and the auto-reengage spins —
+		// a busy-loop that froze the game on enable. When the slot holds a non-freemode hash but the
+		// BODY is confirmed freemode and a valid freemode hash is supplied, we rewrite the slot back
+		// to freemode first, then engage normally.
+		public bool Start(string identity, uint realFreemodeHash = 0) {
 			if (Held) return true;
 			int charIdx = Identity.CharIndex(identity);
 			uint targetHash = Joaat.Hash(Identity.ModelName(identity) ?? "");
@@ -116,13 +126,28 @@ namespace FreemodeIdentity {
 				Logger.LogError($"Spoof: archetype hash mismatch (mem={memHash:X8} api={ped.Model.Hash:X8}) — not engaging.");
 				return false;
 			}
-			// The slot must currently hold a real FREEMODE hash. If it doesn't, it's already stranded
-			// (a prior spoof's hash left on the shared model-info, e.g. after a hard reload) — engaging
-			// would capture that garbage as originalHash and later restore it back, corrupting the
-			// shared freemode model-info so even a genuine protagonist reads wrong. Refuse instead.
+			// The slot must currently hold a real FREEMODE hash. If it doesn't, it's stranded — a
+			// prior spoof's protagonist hash left on the shared model-info (Legacy: the release
+			// restore didn't land). Engaging as-is would capture that garbage as originalHash and
+			// later restore it, poisoning the shared freemode model-info for good. Two outcomes:
+			//   - the BODY is a confirmed freemode ped AND we know the real freemode hash → SELF-HEAL:
+			//     rewrite the slot to the real freemode model, then fall through and engage. Without
+			//     this the auto-reengage refuses every tick and spins (the on-enable freeze).
+			//   - otherwise → refuse (writing freemode onto a genuine protagonist would corrupt it).
 			if (!PedAppearance.IsFreemodeHash(unchecked((int)memHash))) {
-				Logger.LogError($"Spoof: archetype hash {memHash:X8} is not a freemode model — slot looks stranded, not engaging.");
-				return false;
+				bool canHeal = realFreemodeHash != 0
+					&& PedAppearance.IsFreemodeHash(unchecked((int)realFreemodeHash))
+					&& PlayerIdentity.IsFreemodeBody(ped);
+				if (!canHeal) {
+					Logger.LogError($"Spoof: archetype hash {memHash:X8} is not a freemode model — slot looks stranded, not engaging.");
+					return false;
+				}
+				if (!MemScan.WriteUInt32(hashAddr, realFreemodeHash)) {
+					Logger.LogError("Spoof: stranded-poison heal failed — page not writable.");
+					return false;
+				}
+				Logger.Log($"Spoof: healed stranded poison {memHash:X8} -> freemode {realFreemodeHash:X8} before engage.");
+				memHash = realFreemodeHash;
 			}
 			// SAFETY: never spoof while the player IS a genuine story protagonist. A real
 			// protagonist reads identically to a spoofed one, so engaging here would redirect
@@ -145,8 +170,10 @@ namespace FreemodeIdentity {
 			heldPedHandle = ped.Handle;
 
 			// Lever 2: the active-character index global. Best-effort — hold the hash even if
-			// this one can't be written.
-			heldIndexAddr = GetGlobalPtr(CharIndexGlobal);
+			// this one can't be written. Skipped entirely when the build has no such global
+			// (Legacy: CharIndexGlobal == -1) — the hash spoof alone still opens shops; only the
+			// pause-menu name stays freemode while spoofed.
+			heldIndexAddr = CharIndexGlobal >= 0 ? GetGlobalPtr(CharIndexGlobal) : IntPtr.Zero;
 			if (heldIndexAddr != IntPtr.Zero && MemScan.IsReadable(heldIndexAddr, 4)) {
 				originalIndex = MemScan.ReadInt32(heldIndexAddr);
 				spoofIndex = charIdx;

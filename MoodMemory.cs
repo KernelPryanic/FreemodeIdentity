@@ -24,14 +24,14 @@ namespace FreemodeIdentity {
 	// races that churn and, on some peds, faulted the game (an unmapped page between the
 	// readability check and the copy is an UNCATCHABLE access violation). Running the scan as a
 	// tick-driven, time-sliced state machine off the snapshot hot path (the same pattern as
-	// DecorationBaseFinder for tattoos) keeps each tick well under SHVDN's 5s watchdog AND keeps
+	// PedHeadBlendMemory) keeps each tick well under SHVDN's 5s watchdog AND keeps
 	// the scan from racing a synchronous capture. BeginSnapshot kicks this off and defers the
 	// capture; the tick loop completes the snapshot once Result is ready.
 	//
 	// SAFETY: every read is MemScan VirtualQuery-gated and snapshotted into managed buffers; a
 	// wrong/unmapped address can never fault the scan itself.
 	static class MoodMemory {
-		const int PedIntelligenceOffset = 0x10A0;
+		const int PedIntelligenceOffset = GameBuild.PedIntelligenceOffset; // 0x10A0 on both builds
 
 		const ulong ClipBufferMarker = 0x65726F0000000001; // fixed marker qword at field-0x10
 		const int MarkerOff = -0x10;
