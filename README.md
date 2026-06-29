@@ -178,6 +178,10 @@ commit builds and publishes a release - the tag is the version source of truth.
 
 ## Known limitations
 
+- **Turn Spoofing off before loading a save.** Loading a save while spoofed can render a
+  broken (floating-head) body, because the save was taken with the protagonist identity
+  painted on. Toggle Spoofing off in the menu first, then load; turn it back on once
+  you're in. (It re-engages on its own anyway a moment after the load settles.)
 - **Freemode peds only.** Story protagonists and addon/custom models have their face
   baked into the model and can't be captured.
 - **Menyoo randomizer / trainer faces don't round-trip** - they bypass the head-blend
