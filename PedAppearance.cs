@@ -94,12 +94,23 @@ namespace FreemodeIdentity {
 				return false;
 			}
 			Function.Call(Hash.SET_PLAYER_MODEL, Game.Player, hash.Hash);
-			// SET_PLAYER_MODEL destroys the old player ped and creates a new one, so
-			// the previous handle is now invalid. Yield a frame for the new ped to
-			// instantiate, then re-fetch it; a fresh freemode ped comes up naked, so
-			// seed default clothes to make it presentable before any edits land.
-			Script.Wait(0);
-			Ped ped = Game.Player.Character;
+			// SET_PLAYER_MODEL destroys the old player ped and creates a new one, so the previous
+			// handle is now invalid. A single frame yield can return before the new ped exists or
+			// reports the new model, leaving the edits below to land on a stale/half-built ped. Wait
+			// until it actually exists AND reports the freemode model, plus a brief settle, first.
+			Ped ped = null;
+			for (int i = 0; i < 60; i++) { // ~1s budget at 60fps
+				Script.Wait(0);
+				ped = Game.Player.Character;
+				if (ped != null && ped.Exists() && ped.Model.Hash == hash.Hash) {
+					Script.Wait(100); // brief settle so the mesh finishes building before edits
+					break;
+				}
+			}
+			if (ped == null || !ped.Exists()) {
+				hash.MarkAsNoLongerNeeded();
+				return false;
+			}
 			Function.Call(Hash.SET_PED_DEFAULT_COMPONENT_VARIATION, ped);
 			hash.MarkAsNoLongerNeeded();
 			return true;
@@ -112,18 +123,27 @@ namespace FreemodeIdentity {
 			hash == new Model(MaleModel).Hash || hash == new Model(FemaleModel).Hash;
 
 		// True when the ped's BODY is a freemode ped, independent of the archetype hash a spoof may
-		// have painted over it. A freemode ped has a valid head blend (mix weights in [0,1]); a story
-		// protagonist returns no/garbage blend. Lets the stranded-hash recovery tell a real freemode
-		// body wearing a protagonist hash (restore it) from a genuine protagonist body (never touch —
-		// writing freemode onto its shared model-info corrupts the model). Returns false on no ped /
-		// unreadable blend, so the safe default is "don't touch".
+		// have painted over it. Guards every memory write that could poison the shared model-info
+		// (stranded restore / spoof self-heal), so a false positive on a genuine protagonist is the
+		// "broken Franklin" bug: writing freemode onto a protagonist's model-info corrupts it for the
+		// whole session. CONFIRMED in-game: a story protagonist returns a CLEAN all-zero blend, which is
+		// in [0,1] — so an in-range test ALONE passes it (that was the bug). A real freemode ped always
+		// carries real heritage (non-zero parents and/or a non-zero mix), so we require that. A warm
+		// load's transient garbage (NaN, denormals, junk ints) fails the range/sanity checks. Returns
+		// false on no ped / unreadable, so the safe default is "don't touch".
 		public static bool HasFreemodeBody(Ped ped) {
 			if (ped == null || !ped.Exists()) return false;
 			try {
 				OutputArgument arg = OutputArgument.AllocForType<HeadBlendData>();
 				Function.Call(Hash.GET_PED_HEAD_BLEND_DATA, ped, arg);
 				HeadBlendData d = arg.GetResultAsBlittableStruct<HeadBlendData>();
-				return InMixRange(d.ShapeMix) && InMixRange(d.SkinMix) && InMixRange(d.ThirdMix);
+				if (!InMixRange(d.ShapeMix) || !InMixRange(d.SkinMix) || !InMixRange(d.ThirdMix)) return false;
+				// Real freemode parents are small indices (< 64); a junk read or a protagonist's zeros
+				// don't qualify. A non-zero mix is the other tell. Either proves a built freemode head.
+				bool saneParent(int v) => v > 0 && v < 64;
+				return d.ShapeMix != 0f || d.SkinMix != 0f
+					|| saneParent(d.ShapeFirst) || saneParent(d.ShapeSecond)
+					|| saneParent(d.SkinFirst) || saneParent(d.SkinSecond);
 			} catch (Exception e) {
 				Logger.LogError("HasFreemodeBody: " + e);
 				return false;

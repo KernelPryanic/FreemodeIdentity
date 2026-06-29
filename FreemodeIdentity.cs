@@ -845,6 +845,12 @@ namespace FreemodeIdentity {
 			if (GTA.Native.Function.Call<bool>(GTA.Native.Hash.GET_IS_LOADING_SCREEN_ACTIVE)) return "loading screen";
 			if (!GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PLAYER_PLAYING, Game.Player)) return "player not playing";
 			if (!GTA.Native.Function.Call<bool>(GTA.Native.Hash.HAS_COLLISION_LOADED_AROUND_ENTITY, p)) return "collision not loaded";
+			// A warm load (load-save while running) restores the saved protagonist body asynchronously,
+			// and the world fades in / reports playing BEFORE that restore finishes. Our forced
+			// SET_PLAYER_MODEL firing into that in-flight restore builds the freemode body against the
+			// still-loading protagonist resources — the broken floating-head render. The engine drives
+			// the restore through the player-switch machinery, so block the swap until it's done.
+			if (GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PLAYER_SWITCH_IN_PROGRESS)) return "player switch in progress";
 			return null;
 		}
 
@@ -865,8 +871,7 @@ namespace FreemodeIdentity {
 				// protagonist body would just leave it looking wrong. When the body IS already our model
 				// (spoof ped-churn that kept it), don't force: re-paint IN PLACE so the look that a
 				// recreate wiped is restored without a swap that recreates the ped and re-fires the loop.
-				bool bodyAlreadyOurs = RealPlayerModelHash() == new Model(ad.Model).Hash;
-				bool force = !bodyAlreadyOurs;
+				bool force = RealPlayerModelHash() != new Model(ad.Model).Hash;
 				bool ok = PedAppearance.Apply(ad, force, force ? 0 : RealPlayerModelHash());
 				Logger.Log($"Reapply worn look model={ad.Model} -> {(ok ? "OK" : "FAILED (model switch?)")}{(force ? " (forced)" : "")} (auto)");
 				if (ok) {
@@ -1289,7 +1294,7 @@ namespace FreemodeIdentity {
 			MainMenu.Add(WalletEnabledItem);
 
 			SpoofItem = new NativeCheckboxItem("Spoofing Enabled",
-				"Read as a protagonist so shops open and jobs pay out. Turn the wallet on to make money actually change - with it off, the protagonist's balance never moves.",
+				"~y~Required for a fully working wallet.~s~ Reads you as a protagonist so shops open, jobs pay out, and charges route to your wallet. Off = shops stay closed, and spending draws the protagonist's cash without changing their real balance.",
 				spoofEnabled);
 			SpoofItem.CheckboxChanged += (s, a) => SetSpoofEnabled(SpoofItem.Checked);
 			MainMenu.Add(SpoofItem);

@@ -63,8 +63,9 @@ makes money real.
 Because the wallet rides the protagonist's own cash stat, the rest of the game reads it
 as real money: **ATMs show the right balance**, and external job mods
 pay into and charge it correctly. Tested with
-[Casual Jobs (Rabbit Holes)](https://www.gta5-mods.com/scripts/casual-jobs-rabbit-holes) -
-job payouts land in the wallet while spoofed.
+[Casual Jobs (Rabbit Holes)](https://www.gta5-mods.com/scripts/casual-jobs-rabbit-holes)
+and [Driver Jobs V](https://www.gta5-mods.com/scripts/driverjobs-v) - job payouts land in
+the wallet while spoofed.
 
 ## Install
 
@@ -188,6 +189,22 @@ commit builds and publishes a release - the tag is the version source of truth.
   they come out free even with the wallet on. Shops, ATMs and stat-based payouts work.
 - **Overlay tint colours** round-trip shape and opacity but not the palette colour on
   Enhanced yet; **custom moving styles/moods** outside the known tables are left unset.
+- **Enhanced: loading a save while the game is running can render a broken body.** On
+  GTA V Enhanced, loading a savegame *without restarting the game* (a "warm" load) can
+  leave the freemode body mis-rendered (a floating head / hands), because the engine
+  streams the saved body in past the screen fade and our re-apply collides with it. No
+  script-readable signal reliably distinguishes this from a normal load, so it isn't
+  fully fixable from the managed side yet. **Workarounds:** restart the game before
+  loading, or re-apply your look from the menu once you're in. GTA V Legacy is unaffected.
+
+## For mod developers
+
+The wallet redirect hooks `STAT_GET_INT` and `STAT_SET_INT` on the active cash stat
+(`SP0`/`SP1`/`SP2_TOTAL_CASH`). So if your mod touches the player's money the conventional
+way - `Game.Player.Money` (SHVDN), the equivalent `STAT_GET_INT`/`STAT_SET_INT` natives, or
+the cash stat directly - it works with Freemode Identity automatically: while spoofing is on,
+those reads and writes land on the wallet instead of the protagonist's real balance, with
+nothing extra to integrate.
 
 ## License
 
