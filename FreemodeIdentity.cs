@@ -78,11 +78,11 @@ namespace FreemodeIdentity {
 		// Overwrite).
 		static readonly string[] SlotActions = { "Apply", "Set Active", "Overwrite", "Backup", "Apply from Backup", "Rename", "Delete" };
 
-		// Cosmetic prefix marking the active slot's list row: a coloured '>' via GTA colour codes (the
-		// SlotsMenu sets KeepNameCasing so the lowercase codes survive). GREEN when the active slot
-		// has a backup, YELLOW when it doesn't — a glance shows whether the active look is recoverable.
-		// A plain ASCII glyph the menu font actually has — the ● and ★ symbols rendered as a missing-
-		// glyph box. Both forms share the trailing "> " so StripActiveMarker recovers the slot name.
+		// Cosmetic prefix marking the active slot's list row: a coloured '>' (plain ASCII — the menu
+		// font lacks ●/★ glyphs, which render as a missing-glyph box). GREEN when the active slot has a
+		// backup, YELLOW when not — a glance shows whether the active look is recoverable. KeepNameCasing
+		// keeps the lowercase colour codes; both share the trailing "> " so StripActiveMarker recovers
+		// the slot name.
 		const string ActiveMarkerGreen = "~g~>~s~ ";   // active + has backup
 		const string ActiveMarkerYellow = "~y~>~s~ ";  // active, no backup
 
@@ -220,6 +220,11 @@ namespace FreemodeIdentity {
 
 		// Spoof settle gate (see AutoSpoofReady). > SettleTarget so appearance lands first.
 		const int SpoofSettleTarget = 45;
+		// A tick gap above this (real ms) only happens when an open pause menu froze OnTick — a
+		// normal frame is ~7-30ms. The menu-close signal; see the tick-gap detector at OnTick top.
+		const int MenuTickGapMs = 500;
+		bool spoofHoldUntilReapply; // set by the pause-drop; cleared on menu close (OnTick tick-gap)
+		int lastTickMs = -1; // Environment.TickCount of the previous tick; -1 until the first tick
 		int spoofSettleTicks;
 		int spoofSettlePed;
 		int spoofSettleModel;
@@ -345,6 +350,16 @@ namespace FreemodeIdentity {
 			try {
 				Pool.Process();
 
+				// OnTick freezes while the pause menu is open, so a large real-time gap between two
+				// consecutive ticks means the menu was open and just closed. A Load runs inside the menu,
+				// so this is when the restore is over and the pause-dropped spoof may re-engage — release
+				// the hold here (AutoSpoofReady still waits for the body to settle before it engages).
+				int nowMs = Environment.TickCount;
+				if (spoofHoldUntilReapply && lastTickMs >= 0 && nowMs - lastTickMs >= MenuTickGapMs) {
+					spoofHoldUntilReapply = false;
+				}
+				lastTickMs = nowMs;
+
 				// A disabled feature's whole submenu is greyed so its now-inert controls aren't
 				// reachable (the master checkbox is the only way back on). Within Appearance, the
 				// slot controls are additionally greyed mid-snapshot so a re-press can't Apply the
@@ -391,6 +406,20 @@ namespace FreemodeIdentity {
 				}
 
 				Ped player = Game.Player?.Character;
+
+				// Drop the spoof the instant the pause menu opens — the gate to both Save and Load. A save
+				// taken while spoofed stores the protagonist-hashed state, and loading it renders the broken
+				// floating-head body; dropping here means the save captures a clean freemode body and the
+				// load runs with the disguise off. spoofHoldUntilReapply then keeps it off across the menu
+				// (released on menu close, above) so a Load can't snap it back mid-restore; the intent is
+				// untouched, so it re-engages once the body settles. Ticks freeze while paused, so only the
+				// menu-OPENING press lands on a live tick. 199 = keyboard, 200 = controller.
+				bool pauseOpening = GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_CONTROL_JUST_PRESSED, 0, 199)
+					|| GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_CONTROL_JUST_PRESSED, 0, 200);
+				if (pauseOpening && spoof.Held) {
+					spoof.Stop("pause menu opening (clean save)");
+					spoofHoldUntilReapply = true;
+				}
 
 				// One-time stranded-hash recovery: if we reloaded WHILE spoofed, the previous
 				// instance's hash write is still on the ped but the hold is gone, so the ped reads
@@ -601,6 +630,13 @@ namespace FreemodeIdentity {
 		// UNCHANGED for a settle window — the stability check means we only engage AFTER the
 		// ped (including our own apply) has stopped changing.
 		bool AutoSpoofReady() {
+			// Held off after a pause-drop until we've confirmed the menu actually closed (the tick gap
+			// at OnTick top) — a Load runs inside the menu, so this keeps the disguise off across the
+			// whole Save/Load. No active slot => nothing to keep off for.
+			if (spoofHoldUntilReapply && XmlAppearanceStorage.Exists(ActiveSlot)) {
+				spoofSettleTicks = 0;
+				return false;
+			}
 			Ped ped = Game.Player?.Character;
 			bool stable = ped != null && ped.Exists() && PlayerIdentity.IsFreemodeBody(ped)
 				&& GTA.UI.Screen.IsFadedIn;
@@ -876,6 +912,9 @@ namespace FreemodeIdentity {
 				Logger.Log($"Reapply worn look model={ad.Model} -> {(ok ? "OK" : "FAILED (model switch?)")}{(force ? " (forced)" : "")} (auto)");
 				if (ok) {
 					LastAppliedPedHandle = Game.Player?.Character?.Handle ?? 0;
+					// A clobber re-apply means the load is past — also release the pause-drop hold (the
+					// menu-closed tick gap is the primary release; this just frees it a touch sooner).
+					spoofHoldUntilReapply = false;
 				}
 			} catch (Exception ex) {
 				Logger.LogError(ex.ToString());
@@ -1199,7 +1238,7 @@ namespace FreemodeIdentity {
 
 			// Mirror the active slot into the Appearance submenu's header (blue, like the main menu)
 			// so the hub shows what's active without dropping back out. Only while it's open, and only
-			// on change. KeepNameCasing on AppearanceMenu preserves the lowercase ~b~ colour codes.
+			// on change.
 			if (AppearanceMenu.Visible) {
 				string active = string.IsNullOrEmpty(ActiveSlot) ? "no active slot" : ActiveSlot;
 				string appSubtitle = $"~b~{active}~s~";
@@ -1309,7 +1348,7 @@ namespace FreemodeIdentity {
 
 		void BuildAppearanceMenu() {
 			AppearanceMenu = new NativeMenu("Appearance", "Appearance");
-			AppearanceMenu.KeepNameCasing = true; // keep the ~b~ active-slot colour codes lowercase (set live in RefreshSubtitle)
+			AppearanceMenu.KeepNameCasing = true; // see RefreshSubtitle
 			Pool.Add(AppearanceMenu);
 			AppearanceMenuItem = MainMenu.AddSubMenu(AppearanceMenu);
 			AppearanceMenuItem.Description = "Save, apply and auto-apply your freemode look.";
@@ -1322,9 +1361,7 @@ namespace FreemodeIdentity {
 				"Re-apply the active slot, discarding live edits.");
 
 			SlotsMenu = new NativeMenu("Saved Appearances", "Saved Appearances");
-			// Keep casing so the active-slot row's ~g~●~s~ green-dot marker keeps its lowercase
-			// colour codes (LemonUI otherwise upper-cases them and they render as literal text).
-			SlotsMenu.KeepNameCasing = true;
+			SlotsMenu.KeepNameCasing = true; // preserve the active-row marker's colour codes (see the marker constants)
 			Pool.Add(SlotsMenu);
 
 			EditModeItem = new NativeCheckboxItem("Edit Mode",

@@ -153,9 +153,7 @@ namespace FreemodeIdentity {
 		// ---- Heritage (head blend) --------------------------------------------
 
 		public static void ApplyHeritage(Ped ped, AppearanceData ad) {
-			// Arg order is (ped, shape1, shape2, shape3, skin1, skin2, skin3,
-			// shapeMix, skinMix, thirdMix, isParent). isParent = false: these are the
-			// freemode head shape/skin parents, not a parent-of-a-child blend.
+			// isParent = false: these are the head shape/skin parents, not a parent-of-a-child blend.
 			Function.Call(Hash.SET_PED_HEAD_BLEND_DATA, ped,
 				ad.ShapeFirst, ad.ShapeSecond, ad.ShapeThird,
 				ad.SkinFirst, ad.SkinSecond, ad.SkinThird,
@@ -194,9 +192,6 @@ namespace FreemodeIdentity {
 		}
 
 		public static void CaptureHeritage(Ped ped, AppearanceData ad) {
-			// GET_PED_HEAD_BLEND_DATA writes the whole 80-byte HeadBlendData struct
-			// into ONE out-pointer (not 9 separate args). AllocForType sizes the
-			// buffer to the struct; GetResultAsBlittableStruct marshals it back.
 			OutputArgument arg = OutputArgument.AllocForType<HeadBlendData>();
 			Function.Call(Hash.GET_PED_HEAD_BLEND_DATA, ped, arg);
 			HeadBlendData d = arg.GetResultAsBlittableStruct<HeadBlendData>();
@@ -306,7 +301,6 @@ namespace FreemodeIdentity {
 		// ---- Hair & eyes ------------------------------------------------------
 
 		public static void ApplyHairAndEyes(Ped ped, AppearanceData ad) {
-			// Hair is the Hair component drawable; its colour is a palette pair.
 			Function.Call(Hash.SET_PED_COMPONENT_VARIATION, ped,
 				(int)PedComponentType.Hair, ad.HairDrawable, ad.HairTexture, 0);
 			Function.Call(Hash.SET_PED_HAIR_TINT, ped, ad.HairColor, ad.HairHighlightColor);
@@ -363,7 +357,6 @@ namespace FreemodeIdentity {
 					Function.Call(Hash.CLEAR_PED_PROP, ped, p.Slot);
 					continue;
 				}
-				// Last arg true = attach/refresh the prop now.
 				Function.Call(Hash.SET_PED_PROP_INDEX, ped, p.Slot, p.Drawable, p.Texture, true);
 			}
 		}

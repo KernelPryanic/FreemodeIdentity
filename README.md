@@ -189,13 +189,6 @@ commit builds and publishes a release - the tag is the version source of truth.
   they come out free even with the wallet on. Shops, ATMs and stat-based payouts work.
 - **Overlay tint colours** round-trip shape and opacity but not the palette colour on
   Enhanced yet; **custom moving styles/moods** outside the known tables are left unset.
-- **Enhanced: loading a save while the game is running can render a broken body.** On
-  GTA V Enhanced, loading a savegame *without restarting the game* (a "warm" load) can
-  leave the freemode body mis-rendered (a floating head / hands), because the engine
-  streams the saved body in past the screen fade and our re-apply collides with it. No
-  script-readable signal reliably distinguishes this from a normal load, so it isn't
-  fully fixable from the managed side yet. **Workarounds:** restart the game before
-  loading, or re-apply your look from the menu once you're in. GTA V Legacy is unaffected.
 
 ## For mod developers
 
