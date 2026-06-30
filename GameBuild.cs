@@ -75,14 +75,14 @@ namespace FreemodeIdentity {
 		// SP{N}_TOTAL_CASH stat hashes, and all content-located reads are build-independent and
 		// stay at their use sites.
 
-		// SP active-character index global (spoof lever 2). Not cosmetic after all: the gun shop
-		// reads weapon ownership from a per-protagonist stat keyed on THIS index, so without the
-		// write Ammu-Nation reads the wrong slot and re-charges for weapons you own (cash dodges it
-		// — that's model-hash keyed via the shim, a separate path). Enhanced: global 21627 (0x547B).
-		// Legacy: global 1574927, the same selector read by gunclub_shop / player_controller /
-		// main_persistent (verified b3570). Legacy global IDs can renumber across point-releases, so
-		// the spoof logs the value it reads here — a sane 0/1/2 confirms the address on a given build.
-		public static int CharIndexGlobal => IsEnhanced ? 0x547B : 1574927;
+		// SP active-character index global (spoof lever 2: pause-menu name/portrait). Enhanced:
+		// g21627 = 0x547B. The Legacy selector global IS known (1574927 — gunclub_shop /
+		// player_controller / main_persistent all read it, verified b3570 and b3788), but it's
+		// returned as -1 so lever 2 stays SKIPPED on Legacy: the gun shop's "forgot my weapon"
+		// symptom it would have addressed turned out to be a loadout-store wipe, fixed in
+		// SampleLoadout instead, so holding the index buys nothing and the lever-2 memory writes
+		// aren't worth it. Flip this to 1574927 to re-enable it (see the reverted ccae86d).
+		public static int CharIndexGlobal => IsEnhanced ? 0x547B : -1;
 
 		// CPedIntelligence pointer offset within CPed. Verified IDENTICAL on Enhanced (1013.34)
 		// and Legacy (b3258): 0x10A0. Kept here so it has one home and the parity is documented.

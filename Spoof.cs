@@ -22,8 +22,9 @@ namespace FreemodeIdentity {
 	internal sealed class Spoof {
 		const int ArchetypeOffset = 0x20;
 		const int HashOffset = 0x18;
-		// SP active-character index global (lever 2). Enhanced: 0x547B (g21627). Legacy has no
-		// clean equivalent, so GameBuild returns -1 there and lever 2 is skipped — see GameBuild.
+		// SP active-character index global (lever 2). Enhanced: 0x547B (g21627). On Legacy the
+		// global is known but intentionally left off (GameBuild returns -1) so lever 2 is skipped —
+		// see GameBuild for why.
 		static int CharIndexGlobal => GameBuild.CharIndexGlobal;
 
 		[System.Runtime.InteropServices.DllImport("ScriptHookV.dll", ExactSpelling = true, EntryPoint = "?getGlobalPtr@@YAPEA_KH@Z")]
@@ -176,8 +177,8 @@ namespace FreemodeIdentity {
 
 			// Lever 2: the active-character index global. Best-effort — hold the hash even if
 			// this one can't be written. Skipped entirely when the build has no such global
-			// (CharIndexGlobal < 0). The gun shop keys weapon ownership on this index, so the write
-			// is what lets Ammu-Nation see weapons you own as owned across a spoof.
+			// (Legacy: CharIndexGlobal == -1) — the hash spoof alone still opens shops; only the
+			// pause-menu name stays freemode while spoofed.
 			heldIndexAddr = CharIndexGlobal >= 0 ? GetGlobalPtr(CharIndexGlobal) : IntPtr.Zero;
 			if (heldIndexAddr != IntPtr.Zero && MemScan.IsReadable(heldIndexAddr, 4)) {
 				originalIndex = MemScan.ReadInt32(heldIndexAddr);
@@ -189,10 +190,7 @@ namespace FreemodeIdentity {
 
 			Held = true;
 			Target = identity;
-			// Logs the pre-spoof index read so a mis-resolved global (a renumbered Legacy build) shows
-			// as an out-of-range value instead of silently writing to the wrong address.
-			string indexNote = heldIndexAddr != IntPtr.Zero ? $", index {originalIndex}->{spoofIndex}" : ", index lever off";
-			Logger.Log($"Spoof: engaged as {identity} (hash {spoofHash:X8}, charIdx {charIdx}{indexNote}).");
+			Logger.Log($"Spoof: engaged as {identity} (hash {spoofHash:X8}, charIdx {charIdx}).");
 			return true;
 		}
 
