@@ -228,6 +228,15 @@ namespace FreemodeIdentity {
 		bool ReviveApplyPending;
 		int ReviveTimeoutMs = -1;
 		const int ReviveTimeoutGraceMs = 15000; // backstop if control never reads on
+		// This pending re-apply is a death/arrest RECOVERY: the look was reset but the freemode model
+		// is unchanged, so the re-apply re-paints in place rather than forcing a SET_PLAYER_MODEL (a
+		// recreate onto the not-yet-solid respawn floor drops the ped through). Drives both the
+		// in-place repaint and the stuck-fade rescue below.
+		bool RecoveringFromRespawn;
+		// Game-time ms when the post-recovery world first read ready-but-still-faded-out, or -1 when not
+		// waiting. Drives the fade rescue below.
+		int fadeStuckSinceMs = -1;
+		const int FadeRescueDelayMs = 1200; // let a normal (death) fade-in happen first before forcing
 		// When the safety gate (SwapBlockedReason) first started blocking a pending re-apply, and
 		// whether we've already logged the stuck wait once. The wait is indefinite by design (the
 		// look must stay defended), so a gate that never clears would otherwise be silent — we log
@@ -606,12 +615,14 @@ namespace FreemodeIdentity {
 							if (spoof.Held) {
 								spoof.Stop("clobber re-apply");
 							}
-							// A revive needs to wait out the walk-out cutscene (player moved with control
-							// off); a SET_PLAYER_MODEL during it drops the ped through the ground. The
+							// A revive/arrest recovery needs to wait out the walk-out cutscene (player moved
+							// with control off), then re-paint IN PLACE — never a forced SET_PLAYER_MODEL, which
+							// recreates the ped onto the not-yet-solid respawn floor and drops it through. The
 							// other clobbers happen after the player is in control, so they don't wait.
 							if (revived) {
 								ReviveApplyPending = true;
 								ReviveTimeoutMs = Game.GameTime + ReviveTimeoutGraceMs;
+								RecoveringFromRespawn = true;
 							}
 							Logger.Log(released ? "Active look clobbered (released from arrest); re-applying once control returns."
 								: revived ? "Active look clobbered (revived from death); re-applying once control returns."
@@ -651,6 +662,42 @@ namespace FreemodeIdentity {
 							SwapBlockedSinceMs = -1;
 							SwapBlockedLogged = false;
 						}
+						// Rescue a stuck post-arrest fade. After arresting a freemode (non-protagonist) ped the
+						// game's own fade-in never fires: the world loads fully (swapBlocked clears, body reads
+						// freemode) yet the screen stays faded out, so the re-apply waits forever on a fade that
+						// never comes — the infinite black screen. Death recovers its fade on its own. Once the
+						// world is ready but the screen has stayed faded out past the delay (a normal death fade
+						// would already have happened), fade in ourselves; the swapBlocked + freemode-body gate
+						// keeps us from fading into an unstreamed world.
+						if (RecoveringFromRespawn && swapBlocked == null && PlayerIdentity.IsFreemodeBody(player)
+							&& !GTA.UI.Screen.IsFadedIn) {
+							if (fadeStuckSinceMs < 0) { fadeStuckSinceMs = Game.GameTime; }
+							else if (Game.GameTime - fadeStuckSinceMs >= FadeRescueDelayMs) {
+								Logger.LogDebug("Recovery fade stuck out with the world ready — forcing a fade-in.");
+								GTA.Native.Function.Call(GTA.Native.Hash.DO_SCREEN_FADE_IN, 500);
+								// The respawn hides the HUD and radar and relies on that same dead fade to bring
+								// them back, so re-enable them too.
+								GTA.Native.Function.Call(GTA.Native.Hash.DISPLAY_HUD, true);
+								GTA.Native.Function.Call(GTA.Native.Hash.DISPLAY_RADAR, true);
+								fadeStuckSinceMs = -1;
+							}
+						} else {
+							fadeStuckSinceMs = -1;
+						}
+						// A recovery re-paint must land on the recovered FREEMODE body — if the body still reads
+						// non-freemode (mid-respawn), painting now would force a swap. Hold the settle until it's
+						// freemode again so the apply can re-paint in place. Escape via the backstop window: if the
+						// body never comes back freemode (a genuine protagonist swap, not a revive), fall through to
+						// a normal forced apply rather than waiting forever (which would be the old infinite-load).
+						if (RecoveringFromRespawn && !PlayerIdentity.IsFreemodeBody(player)) {
+							bool recoveryTimedOut = ReviveTimeoutMs >= 0 && Game.GameTime >= ReviveTimeoutMs;
+							if (recoveryTimedOut) {
+								RecoveringFromRespawn = false; // give up the in-place guarantee; force a real swap
+								Logger.LogDebug("Recovery body never read freemode — falling back to a forced re-apply.");
+							} else {
+								stable = false;
+							}
+						}
 						if (!stable) {
 							SettleTicks = 0;
 						} else if (SettleTicks < SettleTarget) {
@@ -658,7 +705,9 @@ namespace FreemodeIdentity {
 						} else {
 							AutoApplyDone = true;
 							LastAutoApplyMs = Game.GameTime;
-							ReapplyWornLook();
+							ReapplyWornLook(noForce: RecoveringFromRespawn);
+							RecoveringFromRespawn = false;
+							fadeStuckSinceMs = -1;
 						}
 					}
 				}
@@ -1087,8 +1136,11 @@ namespace FreemodeIdentity {
 					RestoreLoadout(includeVitals: !loadoutVitalsRestored);
 					// A manual Apply during the post-revive walk-out would otherwise leave the backstop
 					// armed to fire a second, redundant swap ~15s later. (Only the timer — NOT AutoApplyDone,
-					// which the appearance-switch flow re-arms here on purpose.)
+					// which the appearance-switch flow re-arms here on purpose.) Clear the recovery flag too,
+					// so a stale no-force intent can't carry into a later auto-apply.
 					ReviveApplyPending = false;
+					RecoveringFromRespawn = false;
+					fadeStuckSinceMs = -1;
 				}
 				if (!silent) {
 					if (ok) {
@@ -1126,11 +1178,10 @@ namespace FreemodeIdentity {
 			if (GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PLAYER_SWITCH_IN_PROGRESS)) return "player switch in progress";
 			// Hospital respawn fall-through: right after a revive the world fades in and collision
 			// reports loaded a beat BEFORE the floor mesh under the NEW spawn point is actually solid.
-			// A forced SET_PLAYER_MODEL then recreates the ped onto an unsolid floor and it drops
-			// through. The tell is the ped sitting in the air with nothing under it — block the swap
-			// until it's grounded (or in a vehicle, where height-above-ground is meaningless). The
-			// threshold is generous so a step/curb never blocks; only a real "no floor yet" gap (the
-			// ped hovering metres up post-respawn) trips it.
+			// Block the swap while the ped is clearly hovering with no floor yet (skipped in a vehicle,
+			// where height-above-ground is meaningless). The threshold is generous so a step/curb never
+			// blocks; the real fall-through protection is now in the revive re-apply itself, which
+			// re-paints in place WITHOUT a model swap (no ped recreate = nothing to fall through).
 			if (!p.IsInVehicle()) {
 				float heightAboveGround = GTA.Native.Function.Call<float>(GTA.Native.Hash.GET_ENTITY_HEIGHT_ABOVE_GROUND, p);
 				if (heightAboveGround > 3.0f) return "not grounded (floor not solid yet)";
@@ -1142,7 +1193,7 @@ namespace FreemodeIdentity {
 		// active slot's current saved data) — NOT blindly the active slot, so a worn backup survives a
 		// respawn instead of being reverted to the active slot. Reads the active slot fresh so an
 		// Overwrite between applies is honoured; a worn backup is re-applied from its in-memory data.
-		void ReapplyWornLook() {
+		void ReapplyWornLook(bool noForce = false) {
 			if (SnapshotInProgress) return;
 			AppearanceData ad = WornLook ?? XmlAppearanceStorage.Get(ActiveSlot);
 			if (ad == null) return;
@@ -1155,7 +1206,9 @@ namespace FreemodeIdentity {
 				// protagonist body would just leave it looking wrong. When the body IS already our model
 				// (spoof ped-churn that kept it), don't force: re-paint IN PLACE so the look that a
 				// recreate wiped is restored without a swap that recreates the ped and re-fires the loop.
-				bool force = RealPlayerModelHash() != new Model(ad.Model).Hash;
+				// noForce (a recovery): re-paint in place even on a hash mismatch — the caller only sets it
+				// once the body reads freemode again, and a forced swap would drop the ped through the floor.
+				bool force = !noForce && RealPlayerModelHash() != new Model(ad.Model).Hash;
 				bool ok = PedAppearance.Apply(ad, force, force ? 0 : RealPlayerModelHash());
 				Logger.Log($"Reapply worn look model={ad.Model} -> {(ok ? "OK" : "FAILED (model switch?)")}{(force ? " (forced)" : "")} (auto)");
 				if (ok) {
