@@ -68,12 +68,17 @@ namespace FreemodeIdentity {
 		// --- Penalties (story-mode death/arrest costs, simulated on the freemode char) -----
 		// We drop the spoof on the death/arrest edge so the respawn streams clean, which means the
 		// game's own protagonist penalties never land. So we replay the cash cost out of the wallet:
-		// floor(pct% of cash) clamped to a cap. (Weapon/armor confiscation was dropped — while spoofed
-		// the game continuously re-grants a protagonist's ammo, so it can't hold without per-frame pinning.)
+		// floor(pct% of cash) clamped to a cap. Arrest also confiscates gear (below) — the earlier
+		// "can't confiscate while spoofed" block was wrong: the ammo only came back from our OWN restore,
+		// not a continuous game re-grant, so editing the loadout store on the arrest edge holds.
 		bool penaltiesEnabled;
 		int penaltyPercent;       // % of the wallet a fee takes (SP uses 5)
 		int penaltyDeathCap;      // max death (healthcare) fee (SP $5,000)
-		int penaltyBustCap;       // max bust (bail) fee; raised above SP's $300 to sting without confiscation
+		int penaltyBustCap;       // max bust (bail) fee (SP $300)
+		// Arrest weapon/armor confiscation, matching SP: a bust takes the drawn weapon, all ammo, armor,
+		// and the Carbine/Nightstick. Off leaves gear untouched (cash fine only). Needs the loadout on —
+		// confiscation edits the loadout store, so with it off there's nothing to take from.
+		bool penaltyConfiscate;
 
 		// === Menu ==========================================================================
 		// The tree: MainMenu holds the two master checkboxes + the Appearance/Wallet anchors;
@@ -321,16 +326,20 @@ namespace FreemodeIdentity {
 		// frame. -1 = never sampled.
 		int lastLoadoutSampleMs = -1;
 		// Game-time ms a re-grant watch was armed (by a restore), or -1 when idle. A model-swap recreate
-		// leaves the ped bare, then the game re-grants its prior MP weapon inventory — coupled to our own
-		// restore, not a fixed delay (proven by an ammo probe). So rather than guess a wait, the sampler
-		// re-asserts the stored loadout until the ped stops diverging from the store, then resumes. This
-		// timestamp only bounds that watch so a genuinely unstorable weapon can't wedge it (the "emptied
-		// weapons come back after disable/enable" bug).
+		// leaves the ped bare, then the game re-grants its prior MP weapon inventory. While the watch is
+		// armed the sampler re-asserts the stored loadout instead of capturing, so the re-grant (weapons or
+		// ammo) never lands in the store — fixing both the "emptied weapons come back" and the "bust ammo
+		// comes back" bugs.
 		int loadoutRestoredAtMs = -1;
-		// Safety cap on the re-grant watch: normally it ends the moment the ped matches the store (event
-		// driven), but if that never happens — an odd weapon the store can't hold — give up and resume
-		// sampling rather than re-assert forever.
-		const int LoadoutRegrantWatchMaxMs = 5000;
+		// Game-time ms the ped FIRST matched the store during the current watch, or -1 while it's still
+		// diverging. The watch clears only once the match has HELD for LoadoutSettleMs — a single matching
+		// tick isn't enough, because the re-grant can arrive a beat after the restore, when a naive "clear
+		// on first match" would already have resumed sampling and recaptured it.
+		int loadoutMatchedSinceMs = -1;
+		// How long the ped must stay matched before the watch clears (see loadoutMatchedSinceMs), and the
+		// safety cap so a genuinely unstorable weapon that never matches can't wedge the watch forever.
+		const int LoadoutSettleMs = 2000;
+		const int LoadoutRegrantWatchMaxMs = 6000;
 		// The selectable sampling periods (ms), shown as the labels below. One shared timer covers
 		// every loadout group.
 		static readonly int[] LoadoutPeriodsMs = { 1000, 2000, 5000, 10000, 30000, 60000 };
@@ -373,7 +382,7 @@ namespace FreemodeIdentity {
 		//   [Wallet]     Enabled, Pickups
 		//   [Loadout]    Enabled, Weapons, Armor, Health, SavePeriodSeconds
 		//   [Skills]     Enabled  (the skill values live in skills.dat, not here)
-		//   [Penalties]  Enabled, Percent, DeathFeeCap, BustFineCap
+		//   [Penalties]  Enabled, Percent, DeathFeeCap, BustFineCap, Confiscate
 		//   [Spoof]      Enabled, Target
 		//   [State]      ActiveSlot, SourceModel, SpoofSourceHash
 		// [General] Enabled is the master switch and deliberately the first key in the file.
@@ -426,7 +435,9 @@ namespace FreemodeIdentity {
 			penaltiesEnabled = Config.GetValue("Penalties", "Enabled", true);
 			penaltyPercent = Math.Min(100, Math.Max(0, Config.GetValue("Penalties", "Percent", 5)));
 			penaltyDeathCap = Math.Max(0, Config.GetValue("Penalties", "DeathFeeCap", 5000));
-			penaltyBustCap = Math.Max(0, Config.GetValue("Penalties", "BustFineCap", 3000));
+			// SP's real bail is 5% capped $300 — authentic now that a bust also takes gear (below) to sting.
+			penaltyBustCap = Math.Max(0, Config.GetValue("Penalties", "BustFineCap", 300));
+			penaltyConfiscate = Config.GetValue("Penalties", "Confiscate", true);
 
 			// Default ON: spoofing is what makes the wallet/shops work, so a fresh install is ready to go
 			// the moment the user flips the master switch (which itself defaults OFF). Safe to default on
@@ -464,6 +475,7 @@ namespace FreemodeIdentity {
 			Config.SetValue("Penalties", "Percent", penaltyPercent);
 			Config.SetValue("Penalties", "DeathFeeCap", penaltyDeathCap);
 			Config.SetValue("Penalties", "BustFineCap", penaltyBustCap);
+			Config.SetValue("Penalties", "Confiscate", penaltyConfiscate);
 			Config.SetValue("Spoof", "Enabled", spoofEnabled);
 			Config.SetValue("Spoof", "Target", spoofTarget);
 			Config.SetValue("State", "ActiveSlot", ActiveSlot);
@@ -661,6 +673,16 @@ namespace FreemodeIdentity {
 				if (penaltiesEnabled && WalletActive) {
 					if (revived) ApplyDeathFee();
 					if (released) ApplyBustPenalty();
+				}
+				// Arrest gear confiscation: edit the loadout store on the release edge, BEFORE the clobber
+				// re-apply below re-gives from it — so the drawn weapon, ammo and armor a bust takes never
+				// come back. Death keeps its gear (SP), so this is arrest-only. Gated on the loadout being
+				// live (nothing to edit otherwise).
+				if (released && penaltiesEnabled && penaltyConfiscate && LoadoutActive) {
+					if (loadout.ConfiscateForArrest(Game.Player?.Character)) {
+						Logger.Log("Penalty: arrest confiscated drawn weapon, ammo and armor.");
+						Notify("Busted - lost your drawn weapon, ammo and armor.");
+					}
 				}
 
 				revived = revived || released;
@@ -1048,6 +1070,7 @@ namespace FreemodeIdentity {
 			}
 			loadoutRestoredOnce = true;
 			loadoutRestoredAtMs = Game.GameTime; // arm the re-grant watch (see loadoutRestoredAtMs)
+			loadoutMatchedSinceMs = -1;          // require a fresh sustained match before it clears
 			Logger.LogDebug($"Loadout restored (weapons={loadoutWeapons} vitals={includeVitals} hasWeapons={loadout.HasWeapons}).");
 		}
 
@@ -1083,22 +1106,32 @@ namespace FreemodeIdentity {
 			if (!loadoutRestoredOnce) {
 				return;
 			}
-			// Re-grant watch (event-driven): after a restore the game re-grants the recreated ped its prior
-			// weapon inventory, coupled to the restore rather than a fixed delay. While the ped still carries
-			// weapons the store doesn't (a re-grant), re-assert the stored loadout instead of sampling — so
-			// an emptied loadout stays empty on the ped, not just in the store. Stop watching the moment the
-			// ped matches the store, or when the safety cap expires (an unstorable weapon that never clears).
+			// Re-grant watch: after a restore the game re-grants the recreated ped its prior weapon
+			// inventory (weapons and/or ammo), arriving a beat after the restore rather than at a fixed
+			// delay. While the ped diverges from the store, re-assert the stored loadout instead of sampling
+			// so the re-grant never lands in the store. The watch clears only once the ped has MATCHED the
+			// store for LoadoutSettleMs straight — a single matching tick isn't enough, since a late re-grant
+			// would slip in right after. A safety cap ends it regardless so an unstorable weapon can't wedge it.
 			if (loadoutRestoredAtMs >= 0) {
 				Ped settled = Game.Player?.Character;
-				bool capExpired = Game.GameTime - loadoutRestoredAtMs >= LoadoutRegrantWatchMaxMs;
-				if (settled != null && settled.Exists() && PlayerIdentity.IsFreemodeBody(settled)
-						&& !loadout.MatchesLive(settled) && !capExpired) {
+				bool live = settled != null && settled.Exists() && PlayerIdentity.IsFreemodeBody(settled);
+				if (live && !loadout.MatchesLive(settled)) {
+					loadoutMatchedSinceMs = -1; // diverging — reset the settle timer
 					if (loadoutWeapons) {
 						loadout.RestoreWeapons(settled);
 					}
-					return; // still diverging — hold sampling, re-check next tick
+				} else if (live) {
+					if (loadoutMatchedSinceMs < 0) {
+						loadoutMatchedSinceMs = Game.GameTime; // first match — start the settle timer
+					}
 				}
-				loadoutRestoredAtMs = -1; // matched (or gave up) — resume normal sampling
+				bool settledLongEnough = loadoutMatchedSinceMs >= 0
+					&& Game.GameTime - loadoutMatchedSinceMs >= LoadoutSettleMs;
+				bool capExpired = Game.GameTime - loadoutRestoredAtMs >= LoadoutRegrantWatchMaxMs;
+				if (!settledLongEnough && !capExpired) {
+					return; // still settling — hold sampling, re-check next tick
+				}
+				loadoutRestoredAtMs = -1; // sustained match (or gave up) — resume normal sampling
 			}
 			if (lastLoadoutSampleMs >= 0 && Game.GameTime - lastLoadoutSampleMs < loadoutSavePeriodMs) {
 				return;

@@ -64,10 +64,12 @@ payouts that flow through the stat while spoofed. Spending **only sticks with th
 on**: with it off a purchase completes but the protagonist's real balance never changes
 (the shop pokes a cash mirror the game reverts).
 
-Dropping the spoof on death/arrest means the game's own story-mode fees don't land, so the
-wallet replays them itself: a **healthcare fee** on a hospital respawn and a **bail fine**
-on release. Each is a percentage of your wallet (5% by default) capped at a flat amount, and
-a `floor` so an empty wallet is never touched. Tune or disable it under `[Penalties]` (ini
+Dropping the spoof on death/arrest means the game's own story-mode penalties don't land, so
+the mod replays them itself. Cash: a **healthcare fee** on a hospital respawn and a **bail
+fine** on release, each a percentage of your wallet (5% by default) capped at a flat amount,
+with a `floor` so an empty wallet is never touched. A bust also **confiscates gear** like
+vanilla — your drawn weapon, all ammo and body armor (plus the Carbine Rifle and Nightstick),
+while the rest of your inventory stays. Tune or disable any of it under `[Penalties]` (ini
 only).
 
 Because the wallet rides the protagonist's own cash stat, the rest of the game reads it
@@ -223,7 +225,8 @@ Pickups = True            ; True | False  - credit collected cash pickups (off a
 Enabled = True            ; True | False  - charge story-mode death/arrest fees to the wallet
 Percent = 5               ; 0-100  - fee as a percentage of the wallet balance
 DeathFeeCap = 5000        ; cap on the healthcare fee charged on a hospital respawn
-BustFineCap = 3000        ; cap on the bail fine charged on release from arrest
+BustFineCap = 300         ; cap on the bail fine charged on release from arrest
+Confiscate = True         ; True | False  - a bust takes your drawn weapon, ammo and armor (vanilla)
 
 [Loadout]
 Enabled = True            ; True | False  - keep and restore weapons, armor and health

@@ -84,11 +84,13 @@ namespace FreemodeIdentity {
 		public int Armor => armor;
 		public int Health => health;
 
-		// True when the live ped carries nothing beyond what the store holds — i.e. the game hasn't
-		// re-granted a weapon the store doesn't have. After a restore this is the "settled" signal: while
-		// false, a re-grant is still pending (re-assert instead of sampling); once true, sampling is safe.
-		// Unarmed is ignored (it's never a stored inventory item). No-fault: a bad read reports settled so
-		// a transient can't wedge the caller in a re-assert loop.
+		// True when the live ped carries nothing beyond what the store holds — no weapon the store lacks,
+		// and no weapon with MORE ammo than the store has. After a restore this is the "settled" signal:
+		// while false, a re-grant is still pending (re-assert instead of sampling); once true, sampling is
+		// safe. The ammo check matters for confiscation: a bust zeroes the store's ammo, but the recreate
+		// re-grants full ammo, and without catching that the sampler would recapture it and undo the take.
+		// Unarmed is ignored (never a stored inventory item). No-fault: a bad read reports settled so a
+		// transient can't wedge the caller in a re-assert loop.
 		public bool MatchesLive(Ped ped) {
 			if (ped == null || !ped.Exists()) {
 				return true;
@@ -98,8 +100,13 @@ namespace FreemodeIdentity {
 					if (wh == WeaponHash.Unarmed) {
 						continue;
 					}
-					if (!weapons.Exists(w => w.Hash == (uint)wh)) {
+					int idx = weapons.FindIndex(w => w.Hash == (uint)wh);
+					if (idx < 0) {
 						return false; // a weapon on the ped that the store doesn't have — a re-grant
+					}
+					int liveAmmo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON, ped, (uint)wh);
+					if (liveAmmo > weapons[idx].Ammo) {
+						return false; // more ammo than stored — a re-grant (e.g. after a bust zeroed it)
 					}
 				}
 			} catch {
@@ -253,6 +260,52 @@ namespace FreemodeIdentity {
 			} catch (Exception e) {
 				Logger.LogError("Loadout.RestoreVitals: " + e);
 			}
+		}
+
+		// --- Confiscation ------------------------------------------------------------------
+
+		// GTA SP's arrest confiscation: the busted player permanently loses the drawn weapon, all ammo and
+		// body armor, plus the Carbine Rifle and Nightstick if held; the rest of the inventory stays but
+		// empty. Edits the STORE so the taken gear never comes back through RestoreLoadout, AND strips the
+		// LIVE ped now so the loss shows immediately rather than only after the later clobber re-apply.
+		// The store edit is what makes it stick — a live strip alone would be undone by the next restore.
+		// Persists so it survives a restart. Returns true when something was actually taken (caller logs).
+		public bool ConfiscateForArrest(Ped ped) {
+			int beforeCount = weapons.Count;
+			int beforeArmor = armor;
+			// The drawn weapon is whatever was equipped at capture; the two always-confiscated specials
+			// are taken even when not in hand (matches SP).
+			bool Taken(uint h) => h == equippedHash
+				|| h == (uint)WeaponHash.CarbineRifle
+				|| h == (uint)WeaponHash.Nightstick;
+			weapons.RemoveAll(w => Taken(w.Hash));
+			// All ammo gone: zero every surviving weapon's stored ammo so the restore re-gives empty guns.
+			for (int i = 0; i < weapons.Count; i++) {
+				WeaponState w = weapons[i];
+				w.Ammo = 0;
+				weapons[i] = w;
+			}
+			// Mirror it onto the live ped for an immediate effect: remove the taken weapons, zero the rest's
+			// ammo, drop armor. Best-effort and no-fault — the store edit above is the authority.
+			if (ped != null && ped.Exists()) {
+				try {
+					foreach (WeaponHash wh in ped.Weapons.GetAllWeaponHashes()) {
+						if (Taken((uint)wh)) {
+							Function.Call(Hash.REMOVE_WEAPON_FROM_PED, ped, (uint)wh);
+						} else if (wh != WeaponHash.Unarmed) {
+							Function.Call(Hash.SET_PED_AMMO, ped, (uint)wh, 0);
+						}
+					}
+					Function.Call(Hash.SET_PED_ARMOUR, ped, 0);
+				} catch (Exception e) {
+					Logger.LogError("Loadout.ConfiscateForArrest (live strip): " + e);
+				}
+			}
+			equippedHash = 0;
+			armor = 0;
+			bool took = weapons.Count != beforeCount || beforeArmor > 0;
+			Save();
+			return took;
 		}
 
 		// --- Persistence --------------------------------------------------------------------
