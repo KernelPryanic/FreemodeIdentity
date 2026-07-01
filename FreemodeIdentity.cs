@@ -531,6 +531,14 @@ namespace FreemodeIdentity {
 					appearanceSwitchTicks++;
 					if (SwitchFullySettled(Game.Player?.Character) || appearanceSwitchTicks >= AppearanceSwitchTimeoutTicks) {
 						appearanceSwitching = false;
+						// Sampling is suppressed for the whole switch, so start the re-grant watch's clock at
+						// the moment it resumes — measuring the cap from when the switch was armed could let
+						// a slow swap (up to the ~10s timeout) burn through the 6s cap before the ped ever
+						// gets sampled, leaving the watch dead in the exact post-settle window it must guard.
+						if (loadoutRestoredAtMs >= 0) {
+							loadoutRestoredAtMs = Game.GameTime;
+							loadoutMatchedSinceMs = -1;
+						}
 					}
 				}
 
@@ -1443,34 +1451,34 @@ namespace FreemodeIdentity {
 			Ped ped = Game.Player?.Character;
 			string genuine = PlayerIdentity.GenuineProtagonist(ped, spoof);
 			if (genuine == null) return;
+			// Don't capture off a still-settling protagonist. On a fast disable→enable bounce the return
+			// swap is mid-recreate when the ped first reads as a genuine protagonist, so its inventory is
+			// half-formed (a defaulted weapon, a transient garbage entry) and capturing it stored the wrong
+			// gear as the protagonist's own loadout. Wait for a faded-in, in-control ped — this fires every
+			// tick, so deferring just retries until the real body is up.
+			if (!GTA.UI.Screen.IsFadedIn || !Game.Player.CanControlCharacter) return;
 			SourceModel = Identity.ModelName(genuine);
 			Config.SetValue("State", "SourceModel", SourceModel);
 			Config.Save();
 			Logger.Log($"Captured source protagonist model={SourceModel}.");
-			// Snapshot the protagonist's OWN loadout AND real skills the same moment we capture their
-			// model — the last tick they're the live genuine protagonist before the freemode char takes
-			// over. Disable replays both so returning to them restores THEIR gear and skills, not the
-			// freemode char's. Both persist to their own files so a restart mid-spoof can still restore.
-			//
-			// Clear each orig store BEFORE capturing: a persisted .orig.dat outlives a restart, so if this
-			// capture faults we must not leave a prior session's snapshot restorable. Clear-then-capture
-			// means a fault restores nothing rather than stale gear/skills.
+			// Snapshot the protagonist's OWN loadout, skills and outfit the moment we capture their model —
+			// the last tick they're the live genuine protagonist before the freemode char takes over. Disable
+			// replays all three so returning to them restores THEIR state, not the freemode char's. Each
+			// persists to its own file so a restart mid-spoof can still restore.
 			int genuineChar = Identity.CharIndex(genuine);
-			protagonistLoadout.Clear();
-			// After a Clear the snapshot is empty, so a real capture always changes it: a false return
-			// here means the ped was gone or the read faulted, not an unchanged sample. Log it — the
-			// store stays empty (restores nothing) rather than silently reusing a prior session's gear.
-			// Bind the capture to this protagonist so a restore onto a different one is refused.
+			// Loadout capture is atomic (a transient read keeps the last good snapshot), so it is NOT Clear()ed
+			// first — the char guard still refuses a cross-char restore. False = the read was rejected.
 			if (!protagonistLoadout.CaptureFrom(ped, loadoutWeapons, loadoutArmor, loadoutHealth, genuineChar)) {
-				Logger.Log("Captured protagonist loadout empty (capture failed) — disable won't restore gear.");
+				Logger.Log("Captured protagonist loadout transient/empty — keeping the last good gear.");
 			}
+			// Skills read the SP{N} character STATS (persistent save data, not the live ped), so a mid-swap
+			// ped can't corrupt them — no atomicity/settle hazard, the char guard is enough. Clear()ed first
+			// so a faulted capture can't leave a prior session's skills restorable.
 			protagonistSkills.Clear();
 			protagonistSkills.CaptureFromGame(genuineChar);
-			// Snapshot their worn outfit too — the return swap recreates them in default clothing, so a
-			// custom look (e.g. set via Menyoo) is otherwise lost. Bound to this char like the others.
-			// NOT Clear()ed first (unlike loadout/skills): CaptureFrom is atomic and keeps the prior good
-			// snapshot if this read comes back empty, so a transitional/hot-reloaded ped can't wipe the
-			// real outfit. A stale cross-char snapshot is still blocked by the char guard on restore.
+			// Outfit too — the return swap recreates them in default clothing, so a custom look (e.g. via
+			// Menyoo) is otherwise lost. Atomic like the loadout: an empty read keeps the last good outfit,
+			// so a transitional/hot-reloaded ped can't wipe it. Char-bound like the others.
 			if (!protagonistLook.CaptureFrom(ped, genuineChar)) {
 				Logger.Log("Captured protagonist outfit empty (capture failed) — keeping the last good outfit.");
 			}
@@ -1579,6 +1587,14 @@ namespace FreemodeIdentity {
 			AutoApplyDone = false;
 			SettleTicks = 0;
 			spoofSettleTicks = 0;
+			// A character switch is exactly when the game re-grants its own view of the freemode inventory
+			// onto the settling ped. The apply legs arm the re-grant watch via RestoreLoadout, but the
+			// disable→protagonist leg doesn't (it restores the protagonist's store, not ours), so a
+			// re-enable bounce could resume sampling before the game's re-grant lands and mirror it into
+			// the store. Arming here covers every leg — enable, disable and the protagonist↔freemode
+			// bounce — so the watch is always live across the window where the re-grant arrives.
+			loadoutRestoredAtMs = Game.GameTime;
+			loadoutMatchedSinceMs = -1;
 		}
 		int appearanceSwitchTicks;
 		const int AppearanceSwitchTimeoutTicks = 600; // ~10s hard backstop so the toggle can't lock off

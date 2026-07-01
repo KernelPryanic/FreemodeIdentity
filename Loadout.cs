@@ -132,7 +132,17 @@ namespace FreemodeIdentity {
 			}
 			try {
 				if (weaponsOn) {
-					CaptureWeapons(ped);
+					// Commit only a clean read: a transitional ped mid model-swap reports garbage inventory
+					// before its real weapons stream in, and mirroring that would overwrite a good store with
+					// junk (the "Invalid weapon in the protagonist store" bug). A null read leaves it untouched.
+					uint scratchEquipped = (uint)ped.Weapons.Current.Hash;
+					var scratch = CaptureWeapons(ped);
+					if (scratch == null) {
+						return false;
+					}
+					weapons.Clear();
+					weapons.AddRange(scratch);
+					equippedHash = scratchEquipped;
 				}
 				if (armorOn) {
 					armor = ped.Armor;
@@ -148,11 +158,12 @@ namespace FreemodeIdentity {
 			return Save();
 		}
 
-		void CaptureWeapons(Ped ped) {
-			weapons.Clear();
-			// SHVDN's Current wraps the out-pointer GET_CURRENT_PED_WEAPON in its own unsafe block, so
-			// we read the equipped hash without this project needing /unsafe.
-			equippedHash = (uint)ped.Weapons.Current.Hash;
+		// Read the ped's weapons into a fresh list. Returns null if any enumerated hash isn't a real weapon
+		// (a transitional ped mid model-swap briefly reports garbage inventory entries) — the caller keeps
+		// its last good snapshot rather than commit a corrupt one. A genuinely empty inventory returns an
+		// empty list (a valid "carrying nothing" read), distinct from a faulted one.
+		static List<WeaponState> CaptureWeapons(Ped ped) {
+			var captured = new List<WeaponState>();
 			foreach (WeaponHash wh in ped.Weapons.GetAllWeaponHashes()) {
 				uint hash = (uint)wh;
 				// Unarmed isn't a real inventory item to re-give; the equipped-weapon restore selects it
@@ -160,8 +171,11 @@ namespace FreemodeIdentity {
 				if (hash == (uint)WeaponHash.Unarmed) {
 					continue;
 				}
+				if (!IsRealWeapon(wh)) {
+					return null; // a garbage hash off a transitional ped — this whole read is suspect
+				}
 				Weapon weapon = ped.Weapons[wh];
-				weapons.Add(new WeaponState {
+				captured.Add(new WeaponState {
 					Hash = hash,
 					Ammo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON, ped, hash),
 					Tint = Function.Call<int>(Hash.GET_PED_WEAPON_TINT_INDEX, ped, hash),
@@ -169,6 +183,18 @@ namespace FreemodeIdentity {
 					Components = CaptureComponents(ped, weapon),
 				});
 			}
+			return captured;
+		}
+
+		// Whether an enumerated hash is a genuine weapon. A transitional ped (mid model-swap) reports garbage
+		// inventory hashes whose display name is the game's "Invalid" sentinel — checked as both the raw
+		// label and its localized text, since a garbage hash resolves to the sentinel either way.
+		static bool IsRealWeapon(WeaponHash wh) {
+			string label = Weapon.GetDisplayNameFromHash(wh);
+			if (string.IsNullOrEmpty(label) || label == "WTT_INVALID" || label == "Invalid") {
+				return false;
+			}
+			return Game.GetLocalizedString(label) != "Invalid";
 		}
 
 		// The attachments actually fitted to this weapon. The candidate list comes from SHVDN's
