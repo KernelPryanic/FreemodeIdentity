@@ -1985,6 +1985,10 @@ namespace FreemodeIdentity {
 					skillFlushUntilMs = Game.GameTime + SkillFlushTrailMs;
 				}
 			} else {
+				// Turning the master on is an explicit "make me my identity" — bring vitals back with it,
+				// so re-arm the one-shot the re-apply consumes. Without this a disable/enable re-applies the
+				// look but skips armor/health (loadoutVitalsRestored stayed true from the cold-load restore).
+				loadoutVitalsRestored = false;
 				// Re-arm the settle gate so the auto-apply gate re-lands this swap (a stale AutoApplyDone
 				// would otherwise skip the re-apply). The OnTick gates, now that masterEnabled is true,
 				// re-apply the active look and re-engage the spoof on their own.
