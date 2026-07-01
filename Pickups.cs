@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using GTA;
 
 namespace FreemodeIdentity {
-	// Freemode earning. A freemode character earns NOTHING from cash pickups — the engine
+	// Money-pickup earning. A freemode character earns NOTHING from cash pickups — the engine
 	// credits the protagonist SP cash bucket, which a freemode char (even fully spoofed)
 	// doesn't resolve to (verified in-game). So we credit the wallet ourselves: read each
 	// money pickup's TRUE value straight from its object struct, and when a tracked money
@@ -11,13 +11,13 @@ namespace FreemodeIdentity {
 	//
 	// Pickup object struct offsets (build VER_EN_1_0_1013_34, found by a sentinel
 	// ground-truth probe): cash VALUE is an int at +0x480, pickup TYPE hash at +0x468.
-	internal sealed class Earning {
+	internal sealed class Pickups {
 		const int OffPickupType = 0x468;
 		const int OffPickupValue = 0x480;
 
 		readonly Wallet wallet;
 
-		public Earning(Wallet wallet) {
+		public Pickups(Wallet wallet) {
 			this.wallet = wallet;
 		}
 
@@ -90,9 +90,16 @@ namespace FreemodeIdentity {
 			return value > 0;
 		}
 
-		// Throttled to SamplePeriodMs. `enabled` gates crediting (the master wallet toggle); we
-		// still track pickups when disabled so the baseline is correct when it's re-enabled.
-		public void Tick(bool enabled) {
+		// Throttled to SamplePeriodMs. `scan` is the Pickups toggle — off means don't scan at all
+		// (the intended escape hatch for anyone who hits pickup-heavy FPS trouble or just doesn't
+		// want earning). `credit` gates adding to the wallet; when it's off but scanning is still on
+		// we keep tracking so the baseline is correct the moment crediting resumes.
+		public void Tick(bool scan, bool credit) {
+			if (!scan) {
+				// Drop the baseline so a later re-enable doesn't credit a pickup that vanished while off.
+				tracked.Clear();
+				return;
+			}
 			int nowMs = Game.GameTime;
 			if (lastSampleMs >= 0 && nowMs - lastSampleMs < SamplePeriodMs) {
 				return;
@@ -121,9 +128,9 @@ namespace FreemodeIdentity {
 			// player moved, not a collection. Credit the cached value once.
 			foreach (KeyValuePair<int, Tracked> kv in tracked) {
 				if (kv.Value.Credited) continue;
-				if (!now.ContainsKey(kv.Key) && enabled && playerPos.DistanceTo(kv.Value.Pos) <= CollectDist) {
+				if (!now.ContainsKey(kv.Key) && credit && playerPos.DistanceTo(kv.Value.Pos) <= CollectDist) {
 					wallet.Add(kv.Value.Value);
-					Logger.Log($"Earning: collected ${kv.Value.Value} -> wallet ${wallet.Balance}.");
+					Logger.Log($"Pickups: collected ${kv.Value.Value} -> wallet ${wallet.Balance}.");
 				}
 			}
 

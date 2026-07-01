@@ -81,7 +81,7 @@
     <Compile Include="Loadout.cs" />
     <Compile Include="Skills.cs" />
     <Compile Include="ShimBridge.cs" />
-    <Compile Include="Earning.cs" />
+    <Compile Include="Pickups.cs" />
     <!-- The unified Script. -->
     <Compile Include="FreemodeIdentity.cs" />
   </ItemGroup>

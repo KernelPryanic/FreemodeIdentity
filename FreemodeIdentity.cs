@@ -37,7 +37,7 @@ namespace FreemodeIdentity {
 		// --- Wallet / spoof engine (from FreemodeWallet) ----------------------------------
 		readonly Wallet wallet = new Wallet();
 		readonly Spoof spoof = new Spoof();
-		readonly Earning earning;
+		readonly Pickups pickups;
 		readonly ShimBridge shim = new ShimBridge();
 
 		// --- Loadout (weapons/armor/health a freemode ped loses) --------------------------
@@ -80,7 +80,7 @@ namespace FreemodeIdentity {
 
 		NativeMenu WalletMenu;
 		NativeItem WalletMenuItem;
-		NativeCheckboxItem EarningItem;
+		NativeCheckboxItem PickupsItem;
 
 		NativeMenu SpoofMenu;                 // top-level Spoofing submenu
 		NativeItem SpoofMenuItem;
@@ -264,7 +264,7 @@ namespace FreemodeIdentity {
 
 		// --- Wallet / spoof config --------------------------------------------------------
 		bool walletEnabled;
-		bool earningEnabled;
+		bool pickupsEnabled;
 		bool spoofEnabled; // persisted INTENT to spoof; the live hold re-engages lazily in OnTick
 		string spoofTarget;
 		// The ped's REAL model-info hash captured when the spoof last engaged, persisted so a
@@ -323,11 +323,11 @@ namespace FreemodeIdentity {
 			Config = ScriptSettings.Load(ScriptPaths.For("FreemodeIdentity.ini"));
 			LoadConfig();
 
-			earning = new Earning(wallet);
+			pickups = new Pickups(wallet);
 			wallet.Load();
 			loadout.Load();
 			skills.Load();
-			Logger.LogBanner($"Config: edition={GameBuild.Current} master={masterEnabled} appearance={appearanceEnabled} wallet={walletEnabled} earning={earningEnabled} spoof={spoofEnabled} target={spoofTarget} menuKey={menuKey}.");
+			Logger.LogBanner($"Config: edition={GameBuild.Current} master={masterEnabled} appearance={appearanceEnabled} wallet={walletEnabled} pickups={pickupsEnabled} spoof={spoofEnabled} target={spoofTarget} menuKey={menuKey}.");
 
 			XmlAppearanceStorage.Initialize(ScriptPaths.DataDirectory);
 			MenuInit();
@@ -342,7 +342,7 @@ namespace FreemodeIdentity {
 		//   [General]    Enabled, MenuKey, LogLevel, Build
 		//   [Appearance] Enabled, ReturnProtagonist
 		//   [ManualSave] MovingStyle, Tattoos, Mood
-		//   [Wallet]     Enabled, Earning
+		//   [Wallet]     Enabled, Pickups
 		//   [Loadout]    Enabled, Weapons, Armor, Health, SavePeriodSeconds
 		//   [Skills]     Enabled  (the skill values live in skills.dat, not here)
 		//   [Penalties]  Enabled, Percent, DeathFeeCap, BustFineCap
@@ -377,7 +377,7 @@ namespace FreemodeIdentity {
 			ManualMood = Config.GetValue("ManualSave", "Mood", false);
 
 			walletEnabled = Config.GetValue("Wallet", "Enabled", true);
-			earningEnabled = Config.GetValue("Wallet", "Earning", true);
+			pickupsEnabled = Config.GetValue("Wallet", "Pickups", true);
 
 			loadoutEnabled = Config.GetValue("Loadout", "Enabled", true);
 			loadoutWeapons = Config.GetValue("Loadout", "Weapons", true);
@@ -426,7 +426,7 @@ namespace FreemodeIdentity {
 			Config.SetValue("ManualSave", "Tattoos", ManualTattoos);
 			Config.SetValue("ManualSave", "Mood", ManualMood);
 			Config.SetValue("Wallet", "Enabled", walletEnabled);
-			Config.SetValue("Wallet", "Earning", earningEnabled);
+			Config.SetValue("Wallet", "Pickups", pickupsEnabled);
 			Config.SetValue("Loadout", "Enabled", loadoutEnabled);
 			Config.SetValue("Loadout", "Weapons", loadoutWeapons);
 			Config.SetValue("Loadout", "Armor", loadoutArmor);
@@ -477,7 +477,7 @@ namespace FreemodeIdentity {
 		// The unified per-frame sequence (handoff §5). The whole reason to merge was to make
 		// appearance-apply and spoof-engage one deterministic order in ONE tick instead of two
 		// racing scripts: capture source → auto-apply/clobber-reapply → spoof reengage →
-		// spoof.Tick → earning → shim. Every old SpoofMarker FILE read is now spoof.Held in
+		// spoof.Tick → pickups → shim. Every old SpoofMarker FILE read is now spoof.Held in
 		// memory, so "is the protagonist reading ours or genuine" is answered exactly.
 		void OnTick(object sender, EventArgs e) {
 			try {
@@ -548,10 +548,15 @@ namespace FreemodeIdentity {
 				// Master OFF = the mod does NO per-frame work. SetEnabled(false) already reverted the
 				// active state (dropped the spoof, returned to the protagonist) on the falling edge, so
 				// once the disable swap has settled there is nothing to defend or sync — skip the whole
-				// feature block (spoof/earning/shim/loadout/death-arrest/auto-apply) and only keep the
+				// feature block (spoof/pickups/shim/loadout/death-arrest/auto-apply) and only keep the
 				// menu tail live so the config screen still refreshes. `appearanceSwitching` keeps the
 				// block running through the disable swap itself so it can complete.
 				if (!masterEnabled && !appearanceSwitching) {
+					// Finish flushing the skill-up widget the disable's unpin re-posts (SetMasterEnabled
+					// armed the trail) — it outlives this skip so the "Stamina +" banner clears.
+					if (Game.GameTime < skillFlushUntilMs) {
+						GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_FLUSH_QUEUE);
+					}
 					if (AnyMenuVisible()) {
 						SyncSpoofItem();
 						RefreshSpoofAvailability();
@@ -814,9 +819,9 @@ namespace FreemodeIdentity {
 					}
 				}
 
-				// Earning credits only while the wallet is on AND earning is on; it still tracks
-				// pickups otherwise so the baseline stays correct.
-				earning.Tick(WalletActive && earningEnabled);
+				// Scan only while Pickups is on; credit only while the wallet is also on. With the
+				// wallet off but Pickups on we keep tracking so the baseline is right when it resumes.
+				pickups.Tick(pickupsEnabled, WalletActive && pickupsEnabled);
 
 				SyncShim();
 
@@ -906,7 +911,7 @@ namespace FreemodeIdentity {
 		// pendingDelta it accumulates; we apply + zero it, then push the authoritative balance.
 		void SyncShim() {
 			if (!shim.TryConnect()) {
-				return; // shim not installed — earning still works, spending just won't redirect
+				return; // shim not installed — pickup earning still works, spending just won't redirect
 			}
 			bool redirect = WalletActive && spoof.Held;
 			int activeStat = redirect ? Identity.WalletStat(spoof.Target) : 0;
@@ -1491,7 +1496,7 @@ namespace FreemodeIdentity {
 			return PlayerIdentity.GenuineProtagonist(player, spoof) != null;
 		}
 
-		// Wallet feature toggle. Off makes the wallet inert: earning and the shop spend-redirect
+		// Wallet feature toggle. Off makes the wallet inert: pickup earning and the shop spend-redirect
 		// both key on walletEnabled in OnTick, so flipping the flag stops them. The spoof is NOT
 		// touched — it's an independent disguise. With the wallet off the shop still opens and the
 		// purchase completes, but the charge can't stick: the shop pokes the SP cash GLOBAL, which
@@ -1831,6 +1836,14 @@ namespace FreemodeIdentity {
 				} else if (spoof.Held) {
 					spoof.Stop("master disable");
 				}
+				// Unpin skills now: once master is off, SyncShim stops running, so without this the shim
+				// holds the last pinned profile and the game keeps posting the "skill up" stats widget on
+				// every sprint. Arm the flush trail — the shim's restore-to-real write is itself a skill
+				// change that re-posts the widget, so the OnTick idle path keeps flushing briefly after.
+				if (shim.TryConnect()) {
+					shim.PushSkills(false, null, null);
+					skillFlushUntilMs = Game.GameTime + SkillFlushTrailMs;
+				}
 			} else {
 				// Re-arm the settle gate so the auto-apply gate re-lands this swap (a stale AutoApplyDone
 				// would otherwise skip the re-apply). The OnTick gates, now that masterEnabled is true,
@@ -1848,7 +1861,7 @@ namespace FreemodeIdentity {
 			AppearanceMenuItem = MainMenu.AddSubMenu(AppearanceMenu);
 			AppearanceMenuItem.Description = "Save, apply and auto-apply your freemode look.";
 
-			EnabledItem = new NativeCheckboxItem("Appearance Enabled",
+			EnabledItem = new NativeCheckboxItem("Enabled",
 				"Turn on to wear your saved look, or off to go back to your story character.",
 				appearanceEnabled);
 			EnabledItem.CheckboxChanged += (s, a) => SetEnabled(EnabledItem.Checked);
@@ -1893,21 +1906,21 @@ namespace FreemodeIdentity {
 			WalletMenuItem = MainMenu.AddSubMenu(WalletMenu);
 			WalletMenuItem.Description = "Earn from pickups and route shop charges here while spoofing.";
 
-			WalletEnabledItem = new NativeCheckboxItem("Wallet Enabled",
+			WalletEnabledItem = new NativeCheckboxItem("Enabled",
 				"Turn off to stop earning from pickups and routing shop charges to your wallet.",
 				walletEnabled);
 			WalletEnabledItem.CheckboxChanged += (s, a) => SetWalletEnabled(WalletEnabledItem.Checked);
 			WalletMenu.Add(WalletEnabledItem);
 
-			EarningItem = new NativeCheckboxItem("Pickups Enabled",
-				"Credit the wallet the real value of collected cash pickups.",
-				earningEnabled);
-			EarningItem.CheckboxChanged += (s, a) => {
-				earningEnabled = EarningItem.Checked;
-				Config.SetValue("Wallet", "Earning", earningEnabled);
+			PickupsItem = new NativeCheckboxItem("Pickups Enabled",
+				"Credit the wallet the real value of collected cash pickups. Turn off to also stop scanning for them if you hit FPS trouble in pickup-heavy scenes.",
+				pickupsEnabled);
+			PickupsItem.CheckboxChanged += (s, a) => {
+				pickupsEnabled = PickupsItem.Checked;
+				Config.SetValue("Wallet", "Pickups", pickupsEnabled);
 				Config.Save();
 			};
-			WalletMenu.Add(EarningItem);
+			WalletMenu.Add(PickupsItem);
 		}
 
 		// Spoofing feature toggle (in the Spoofing submenu). Records the INTENT to spoof; it engages
@@ -1940,7 +1953,7 @@ namespace FreemodeIdentity {
 			SpoofMenuItem = MainMenu.AddSubMenu(SpoofMenu);
 			SpoofMenuItem.Description = "Disguise as a protagonist so shops open.";
 
-			SpoofItem = new NativeCheckboxItem("Spoofing Enabled",
+			SpoofItem = new NativeCheckboxItem("Enabled",
 				"~y~Required for a fully working wallet.~s~ Reads you as a protagonist so shops open, jobs pay out, and charges route to your wallet. Engages once you're a freemode character and the mod is on. Off = shops stay closed, and spending draws the protagonist's cash without changing their real balance.",
 				spoofEnabled);
 			SpoofItem.CheckboxChanged += (s, a) => SetSpoofEnabled(SpoofItem.Checked);
@@ -1978,7 +1991,7 @@ namespace FreemodeIdentity {
 			LoadoutMenuItem = MainMenu.AddSubMenu(LoadoutMenu);
 			LoadoutMenuItem.Description = "Keep your weapons, armor and health across loads and respawns.";
 
-			LoadoutEnabledItem = new NativeCheckboxItem("Loadout Enabled",
+			LoadoutEnabledItem = new NativeCheckboxItem("Enabled",
 				"Periodically saves your carried weapons, armor and health, and restores them when your look is applied.",
 				loadoutEnabled);
 			LoadoutEnabledItem.CheckboxChanged += (s, a) => SetLoadoutEnabled(LoadoutEnabledItem.Checked);
@@ -2053,7 +2066,7 @@ namespace FreemodeIdentity {
 			SkillsMenuItem = MainMenu.AddSubMenu(SkillsMenu);
 			SkillsMenuItem.Description = "Set your character's skill levels — they don't level up on their own.";
 
-			SkillsEnabledItem = new NativeCheckboxItem("Skills Enabled",
+			SkillsEnabledItem = new NativeCheckboxItem("Enabled",
 				"Applies your chosen skill profile (strength, stamina, shooting...) while spoofed. Set the values below.",
 				skillsEnabled);
 			SkillsEnabledItem.CheckboxChanged += (s, a) => SetSkillsEnabled(SkillsEnabledItem.Checked);
