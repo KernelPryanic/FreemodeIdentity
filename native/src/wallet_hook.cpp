@@ -3,8 +3,10 @@
 #include "build_edition.hpp"
 #include "decoration.hpp"
 #include "logger.hpp"
+#include "native_hook.hpp"
 #include "natives.hpp"
 #include "natives_legacy.hpp"
+#include "skill_feed.hpp"
 #include "stats.hpp"
 #include "waypoint.hpp"
 #include "rage.hpp"
@@ -200,52 +202,6 @@ void HookStatGetInt(rage::scrNativeCallContext* ctx) {
 	g_origStatGetInt(ctx);
 }
 
-// Native handlers on Enhanced are short thunks that jmp to the real body; MinHook can't
-// relocate those (MH_ERROR_UNSUPPORTED_FUNCTION). Follow a leading jmp. Handles E9
-// (rel32) and FF 25 (jmp qword [rip+disp32]). Legacy handlers are direct functions, so this
-// is a no-op there (the leading byte won't be a jmp).
-void* ResolveThunk(void* fn) {
-	uint8_t* p = reinterpret_cast<uint8_t*>(fn);
-	if (p[0] == 0xE9) {
-		int32_t rel = *reinterpret_cast<int32_t*>(p + 1);
-		return p + 5 + rel;
-	}
-	if (p[0] == 0xFF && p[1] == 0x25) {
-		int32_t disp = *reinterpret_cast<int32_t*>(p + 2);
-		return *reinterpret_cast<void**>(p + 6 + disp);
-	}
-	return fn;
-}
-
-// Resolve a native handler for the running edition. Both editions key on the SAME translated
-// hash (XHASH_*); only the resolver differs — Legacy walks the scrNativeRegistration table,
-// Enhanced uses the InitNativeTables trick.
-rage::scrNativeHandler ResolveHandler(uint64_t hash) {
-	return BuildEdition::IsLegacy() ? NativesLegacy::GetHandler(hash) : Natives::GetHandler(hash);
-}
-
-bool InstallOne(uint64_t hash, void* detour, void** trampoline, const char* name) {
-	rage::scrNativeHandler handler = ResolveHandler(hash);
-	if (!handler) {
-		Logger::Logf("shim: could not resolve handler for %s (%016llX)", name, hash);
-		return false;
-	}
-	// Legacy handlers are direct functions; Enhanced ones are jmp thunks MinHook can't relocate.
-	void* target = BuildEdition::IsLegacy()
-	                   ? reinterpret_cast<void*>(handler)
-	                   : ResolveThunk(reinterpret_cast<void*>(handler));
-	if (MH_CreateHook(target, detour, trampoline) != MH_OK) {
-		Logger::Logf("shim: MH_CreateHook(%s) failed", name);
-		return false;
-	}
-	if (MH_EnableHook(target) != MH_OK) {
-		Logger::Logf("shim: MH_EnableHook(%s) failed", name);
-		return false;
-	}
-	Logger::Logf("shim: hooked %s @ %p", name, target);
-	return true;
-}
-
 } // namespace
 
 namespace WalletHook {
@@ -287,10 +243,13 @@ bool Install() {
 		return false; // pattern miss already logged; fail safe
 
 	bool ok = true;
-	ok &= InstallOne(XHASH_STAT_SET_INT, reinterpret_cast<void*>(&HookStatSetInt),
-	                 reinterpret_cast<void**>(&g_origStatSetInt), "STAT_SET_INT");
-	ok &= InstallOne(XHASH_STAT_GET_INT, reinterpret_cast<void*>(&HookStatGetInt),
-	                 reinterpret_cast<void**>(&g_origStatGetInt), "STAT_GET_INT");
+	ok &= NativeHook::Install(XHASH_STAT_SET_INT, reinterpret_cast<void*>(&HookStatSetInt),
+	                          reinterpret_cast<void**>(&g_origStatSetInt), "STAT_SET_INT");
+	ok &= NativeHook::Install(XHASH_STAT_GET_INT, reinterpret_cast<void*>(&HookStatGetInt),
+	                          reinterpret_cast<void**>(&g_origStatGetInt), "STAT_GET_INT");
+	// Suppress the skill-up feed widget at the source. Best-effort: a failure only means the banner
+	// shows as before, so it must NOT fail the wallet install.
+	SkillFeed::Install();
 
 	g_installed = ok;
 	Logger::Log(ok ? "shim: hooks installed." : "shim: install incomplete — see failures.");

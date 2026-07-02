@@ -69,13 +69,6 @@ namespace FreemodeIdentity {
 		// is otherwise lost. Same enable-edge/disable pattern and safety gates as the two above.
 		readonly StoryLook protagonistLook = new StoryLook();
 		bool skillsEnabled;
-		// Keep flushing the skill-up feed widget until this time, so the shim's restore-to-real write on
-		// unpin (itself a skill change) doesn't leave the widget stuck. Re-armed every frame while pinned.
-		int skillFlushUntilMs = -1;
-		const int SkillFlushTrailMs = 1500;
-		// How many feed ids below the live head to sweep when clearing the skill banner (see
-		// SweepSkillWidget) — covers a few frames of banner re-posts, small enough to stay cheap.
-		const int SkillWidgetSweepSpan = 8;
 		// Progression activity watcher: throttled so it costs a handful of cheap natives a few times a
 		// second, not every frame (heed the per-frame-cost work — no memory walks here). We award XP as
 		// XP-per-second scaled by the real elapsed time since the last sample, so the climb rate is
@@ -179,45 +172,9 @@ namespace FreemodeIdentity {
 		// ~r~ = something failed. Warn/Fail colour only a short leading TAG then ~s~ back to plain,
 		// so the emphasis lands on the headline, not the whole line. The single "busy" message is
 		// shared so the several "snapshot still saving" call sites can't drift apart.
-		static void Notify(string message) => TrackFeedPost(GTA.UI.Notification.PostTicker(message, false));
-		static void Warn(string tag, string detail) => TrackFeedPost(GTA.UI.Notification.PostTicker($"~y~{tag}~s~ {detail}", false));
-		static void Fail(string tag, string detail) => TrackFeedPost(GTA.UI.Notification.PostTicker($"~r~{tag}~s~ {detail}", false));
-
-		// Remember the ids of tickers WE post so the banner sweep can spare them. A small ring is plenty —
-		// only very recent tickers are still on-screen when a sweep runs, and old ids age out.
-		const int OwnFeedIdMemory = 12;
-		static readonly int[] ownFeedIds = new int[OwnFeedIdMemory];
-		static int ownFeedIdCursor;
-		static void TrackFeedPost(FeedPost post) {
-			if (post == null) return; // PostTicker can return null before the feed is ready
-			ownFeedIds[ownFeedIdCursor] = post.Handle;
-			ownFeedIdCursor = (ownFeedIdCursor + 1) % OwnFeedIdMemory;
-		}
-		static bool IsOwnFeedId(int id) {
-			for (int i = 0; i < OwnFeedIdMemory; i++) if (ownFeedIds[i] == id) return true;
-			return false;
-		}
-
-		// Clear the game's re-posted skill-up banner without a full-queue flush (which ate our wallet
-		// tickers). The banner re-posts every frame with an ever-rising feed id, so a window anchored to our
-		// own last ticker goes stale whenever nothing else posts (e.g. cruising a bike) and the banner
-		// escapes it. Instead read the LIVE head from a throwaway ticker, then remove the span just below it
-		// where this frame's banner sits, sparing our own tickers. REMOVE_ITEM on a dead id is a no-op.
-		static void SweepSkillWidget() {
-			// A feed hiccup must never abort OnTick — that would strand the disable/restore path (a throw
-			// here once wiped a protagonist's stats/gear). A missed sweep only flickers the banner.
-			try {
-				FeedPost probe = GTA.UI.Notification.PostTicker(" ", false);
-				if (probe == null) return; // feed not ready yet
-				int head = probe.Handle;
-				GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_REMOVE_ITEM, head); // remove the probe itself
-				for (int id = head - 1; id > head - 1 - SkillWidgetSweepSpan; id--) {
-					if (!IsOwnFeedId(id)) GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_REMOVE_ITEM, id);
-				}
-			} catch {
-				// swallow — see Logger discipline
-			}
-		}
+		static void Notify(string message) => GTA.UI.Notification.PostTicker(message, false);
+		static void Warn(string tag, string detail) => GTA.UI.Notification.PostTicker($"~y~{tag}~s~ {detail}", false);
+		static void Fail(string tag, string detail) => GTA.UI.Notification.PostTicker($"~r~{tag}~s~ {detail}", false);
 		static void NotifyBusy() => Notify("Snapshot still saving - try again in a moment.");
 
 		// -1 = not yet primed, so the first call after load adopts the balance silently instead of
@@ -694,11 +651,6 @@ namespace FreemodeIdentity {
 				// menu tail live so the config screen still refreshes. `appearanceSwitching` keeps the
 				// block running through the disable swap itself so it can complete.
 				if (!masterEnabled && !appearanceSwitching) {
-					// Finish clearing the skill-up widget the disable's unpin re-posts (SetMasterEnabled
-					// armed the trail) — it outlives this skip so the "Stamina +" banner clears.
-					if (Game.GameTime < skillFlushUntilMs) {
-						SweepSkillWidget();
-					}
 					if (AnyMenuVisible()) {
 						SyncSpoofItem();
 						RefreshSpoofAvailability();
@@ -1109,21 +1061,9 @@ namespace FreemodeIdentity {
 			int skillsChar = pinSkills ? Identity.CharIndex(spoof.Target) : -1;
 			shim.PushSkills(pinSkills, EffectiveSkillHashes(skillsChar), skills.Values());
 
-			// Our memory write makes a skill value differ from the protagonist's saved profile, which
-			// stats_controller.ysc treats as a skill-up and posts a sticky THEFEED stats widget (the
-			// "Stamina + 100/100" portrait bar). It's not a HUD_COMPONENT and survives THEFEED_PAUSE, so
-			// the item has to be removed — continuously while pinned, since the script re-posts it. Keep
-			// removing for a short window AFTER unpinning too: the shim's restore-to-real write is itself
-			// a skill change that re-posts the widget, so a hard cut-off would leave it stuck on disable.
-			if (pinSkills) {
-				skillFlushUntilMs = Game.GameTime + SkillFlushTrailMs;
-			}
-			// Hold the sweep off during the appearance switch: posting/removing a feed item every frame
-			// while the model is swapping and streaming churns the HUD feed at the worst moment. The banner
-			// isn't a concern mid-swap; the trail resumes clearing it once the switch settles.
-			if (Game.GameTime < skillFlushUntilMs && !appearanceSwitching) {
-				SweepSkillWidget();
-			}
+			// The "Stamina +" skill-up feed widget the pin would otherwise trigger (our memory write reads
+			// as a skill-up to stats_controller.ysc) is suppressed at the source by the shim's
+			// THEFEED_POST_STATS hook — gated on the same skillsPinned flag pushed above, so nothing to do here.
 
 			// Simulated progression: award XP to FREE skills from watched activity, but ONLY while we're
 			// actually pinning (Skills on AND spoofed). Sharing pinSkills is deliberate — a free skill can
@@ -2219,11 +2159,10 @@ namespace FreemodeIdentity {
 				}
 				// Unpin skills now: once master is off, SyncShim stops running, so without this the shim
 				// holds the last pinned profile and the game keeps posting the "skill up" stats widget on
-				// every sprint. Arm the flush trail — the shim's restore-to-real write is itself a skill
-				// change that re-posts the widget, so the OnTick idle path keeps flushing briefly after.
+				// every sprint. Clearing skillsPinned also lifts the shim's banner suppressor, so the
+				// restore-to-real write's one skill-up shows — same as vanilla returning to the protagonist.
 				if (shim.TryConnect()) {
 					shim.PushSkills(false, null, null);
-					skillFlushUntilMs = Game.GameTime + SkillFlushTrailMs;
 				}
 				// SyncShim (which normally re-arms the watch clock when it stops pinning) doesn't run while
 				// the master is off, so reset it here — otherwise the first award after re-enabling would

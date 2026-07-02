@@ -36,6 +36,8 @@ add_library(FreemodeIdentity SHARED
 	src/stats.cpp
 	src/natives.cpp
 	src/natives_legacy.cpp
+	src/native_hook.cpp
+	src/skill_feed.cpp
 	src/wallet_hook.cpp
 )
 
