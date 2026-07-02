@@ -50,6 +50,15 @@ namespace FreemodeIdentity {
 
 		// --- Skills (a user-set skill profile; they don't progress on their own) ----------
 		readonly Skills skills = new Skills();
+		// Simulated progression riding the same shim pin: per-skill halted (hold the value) vs progressing
+		// (climb via our own activity-watched XP). Holds the lock flags + the sub-level XP toward the next
+		// level + the speed curve; the skill VALUE itself lives in `skills` and climbs there as whole levels
+		// are earned, so the number the user sees is the progression.
+		readonly SkillProgress skillProgress = new SkillProgress(Skills.Names.Length);
+		// Skill indices into Skills.Names/values — the activity watcher awards XP by name, not position.
+		// MUST match the order in Skills.Names { STRENGTH, STAMINA, SHOOTING, STEALTH, FLYING, DRIVING, LUNG }.
+		const int SkillStrength = 0, SkillStamina = 1, SkillShooting = 2, SkillStealth = 3,
+			SkillFlying = 4, SkillDriving = 5, SkillLung = 6;
 		// The genuine protagonist's real skills, snapshotted at enable and written back on disable so
 		// returning to them restores THEIR values authoritatively. Persisted to its own file so it
 		// survives a restart mid-spoof — the shim's in-memory original does not, which let a reload reset
@@ -64,6 +73,20 @@ namespace FreemodeIdentity {
 		// unpin (itself a skill change) doesn't leave the widget stuck. Re-armed every frame while pinned.
 		int skillFlushUntilMs = -1;
 		const int SkillFlushTrailMs = 1500;
+		// Progression activity watcher: throttled so it costs a handful of cheap natives a few times a
+		// second, not every frame (heed the per-frame-cost work — no memory walks here). We award XP as
+		// XP-per-second scaled by the real elapsed time since the last sample, so the climb rate is
+		// frame-rate independent and the throttle interval can change without re-tuning the curve.
+		int lastSkillWatchMs = -1;
+		const int SkillWatchIntervalMs = 500;
+		// Persist accumulated XP on this cadence (not every award — that would hammer the disk). The
+		// in-memory XP is authoritative for the session; this just flushes it so a climb survives a crash.
+		int lastSkillXpSaveMs = -1;
+		const int SkillXpSaveIntervalMs = 30000;
+		// Guards the skill setter's ItemChanged: true while WE move a row's SelectedIndex to show the
+		// climbed value, so the handler doesn't mistake our programmatic move for a user edit (which would
+		// reset the sub-level XP and fight the climb).
+		bool suppressSkillItemChanged;
 
 		// --- Penalties (story-mode death/arrest costs, simulated on the freemode char) -----
 		// We drop the spoof on the death/arrest edge so the respawn streams clean, which means the
@@ -118,6 +141,7 @@ namespace FreemodeIdentity {
 		NativeItem SkillsMenuItem;
 		NativeCheckboxItem SkillsEnabledItem;
 		NativeListItem<int>[] SkillItems;
+		NativeListItem<string> SkillSpeedItem;
 
 		NativeMenu DebugMenu;                 // Debug ▸ — log level + live identity read-outs
 		NativeListItem<string> LogLevelItem;
@@ -363,6 +387,7 @@ namespace FreemodeIdentity {
 			protagonistLoadout.Load();
 			skills.Load();
 			protagonistSkills.Load();
+			skillProgress.Load();
 			protagonistLook.Load();
 			Logger.LogBanner($"Config: edition={GameBuild.Current} master={masterEnabled} appearance={appearanceEnabled} wallet={walletEnabled} pickups={pickupsEnabled} spoof={spoofEnabled} target={spoofTarget} menuKey={menuKey}.");
 
@@ -424,9 +449,14 @@ namespace FreemodeIdentity {
 			int periodSec = Config.GetValue("Loadout", "SavePeriodSeconds", 2);
 			loadoutSavePeriodMs = NearestLoadoutPeriodMs(periodSec * 1000);
 
-			// Default OFF: an unset profile is all-zeros, so applying it on an untouched install would
-			// force skills to 0 — worse than leaving them. Only enforce once the user opts in.
+			// Default OFF: an untouched profile is all-zeros, so applying it on a fresh install would force
+			// skills to 0 — worse than leaving them. Only enforce once the user opts in with the toggle.
 			skillsEnabled = Config.GetValue("Skills", "Enabled", false);
+			// Progression speed multiplier: 1.0 = default pace, 2.0 = twice as fast, 0.5 = half. Stored as
+			// a percent int in the ini (100 = 1.0×) so the config stays integer-clean; the menu writes it
+			// back when the user picks a preset. Clamped sane so a typo can't stall or instantly-max a skill.
+			int speedPct = Config.GetValue("Skills", "ProgressSpeedPercent", (int)(SkillProgress.DefaultSpeed * 100));
+			skillProgress.SetSpeed(speedPct / 100f);
 
 			// Default ON: an enabled wallet should feel like real SP money, so death/arrest cost something
 			// out of the box (gated on the wallet being active anyway). Ini-only — no menu toggle. Percent
@@ -471,6 +501,7 @@ namespace FreemodeIdentity {
 			Config.SetValue("Loadout", "Health", loadoutHealth);
 			Config.SetValue("Loadout", "SavePeriodSeconds", loadoutSavePeriodMs / 1000);
 			Config.SetValue("Skills", "Enabled", skillsEnabled);
+			Config.SetValue("Skills", "ProgressSpeedPercent", (int)(skillProgress.Speed * 100));
 			Config.SetValue("Penalties", "Enabled", penaltiesEnabled);
 			Config.SetValue("Penalties", "Percent", penaltyPercent);
 			Config.SetValue("Penalties", "DeathFeeCap", penaltyDeathCap);
@@ -559,6 +590,12 @@ namespace FreemodeIdentity {
 				if (LoadoutArmorItem != null) LoadoutArmorItem.Enabled = loadoutEnabled;
 				if (LoadoutHealthItem != null) LoadoutHealthItem.Enabled = loadoutEnabled;
 				if (LoadoutPeriodItem != null) LoadoutPeriodItem.Enabled = loadoutEnabled;
+				// Skill setters + speed grey on the Skills feature's own flag (config, editable while the
+				// master is off), same as the Loadout children.
+				if (SkillItems != null) {
+					foreach (var it in SkillItems) if (it != null) it.Enabled = skillsEnabled;
+				}
+				if (SkillSpeedItem != null) SkillSpeedItem.Enabled = skillsEnabled;
 
 				// Live actions — these reach into the live ped, so block them while the mod is off (and
 				// while mid-snapshot / without a target slot, as before).
@@ -607,6 +644,9 @@ namespace FreemodeIdentity {
 					if (AnyMenuVisible()) {
 						SyncSpoofItem();
 						RefreshSpoofAvailability();
+					}
+					if (SkillsMenu.Visible) {
+						RefreshSkillLabels();
 					}
 					if (DebugMenu.Visible) {
 						RefreshDebugMenu();
@@ -909,6 +949,9 @@ namespace FreemodeIdentity {
 					SyncSpoofItem();
 					RefreshSpoofAvailability();
 				}
+				if (SkillsMenu.Visible) {
+					RefreshSkillLabels();
+				}
 				if (DebugMenu.Visible) {
 					RefreshDebugMenu();
 				}
@@ -995,11 +1038,13 @@ namespace FreemodeIdentity {
 
 			// Pin the skill profile: the shim masks the skill GET to our value AND re-asserts it into the
 			// real stat memory each frame (the native path alone gets reverted; the gameplay code reads
-			// the real stat object). Gated on Skills-enabled AND spoofed (a genuine protagonist is never
-			// masked); push a cleared set otherwise so no stale profile lingers.
+			// the real stat object). Gated on Skills enabled AND spoofed (a genuine protagonist is never
+			// masked); push a cleared set otherwise so no stale profile lingers. A pass-through skill (halted
+			// at 0 = "don't manage this one") gets a ZERO hash so the shim skips it and leaves the real value
+			// alone — otherwise configuring one skill would pin the other six to 0.
 			bool pinSkills = SkillsActive && spoof.Held;
 			int skillsChar = pinSkills ? Identity.CharIndex(spoof.Target) : -1;
-			shim.PushSkills(pinSkills, skills.HashesFor(skillsChar), skills.Values());
+			shim.PushSkills(pinSkills, EffectiveSkillHashes(skillsChar), skills.Values());
 
 			// Our memory write makes a skill value differ from the protagonist's saved profile, which
 			// stats_controller.ysc treats as a skill-up and posts a sticky THEFEED stats widget (the
@@ -1014,6 +1059,115 @@ namespace FreemodeIdentity {
 			if (Game.GameTime < skillFlushUntilMs) {
 				GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_FLUSH_QUEUE);
 			}
+
+			// Simulated progression: award XP to FREE skills from watched activity, but ONLY while we're
+			// actually pinning (Skills on AND spoofed). Sharing pinSkills is deliberate — a free skill can
+			// only climb when there's a freemode ped whose value we can hold, which is exactly the pin
+			// condition. Off/disabled/unspoofed, nothing accumulates and the earned XP just sits persisted
+			// until the next enable, so the climb resumes rather than resetting.
+			if (pinSkills) {
+				WatchSkillActivity();
+			} else {
+				// Left the pin window (disabled, unspoofed, master off). Re-arm the sample clock so the
+				// first award after re-enabling measures from THEN, not across the whole idle gap — a
+				// stale elapsed would hand a free skill a lump of XP for time it wasn't even active.
+				lastSkillWatchMs = -1;
+			}
+		}
+
+		// Award progression XP to the FREE skills from cheap activity signals. Throttled to a few
+		// samples a second (no per-frame cost, no memory walks — see the perf work), scaling each award
+		// by the real seconds elapsed so the climb is frame-rate and interval independent. Called only
+		// from the pin window in SyncShim, so the state gate (Skills on + spoofed) is already met.
+		void WatchSkillActivity() {
+			int now = Game.GameTime;
+			if (lastSkillWatchMs < 0) { lastSkillWatchMs = now; return; } // first sample sets the clock
+			int elapsedMs = now - lastSkillWatchMs;
+			if (elapsedMs < SkillWatchIntervalMs) return;
+			lastSkillWatchMs = now;
+			float seconds = elapsedMs / 1000f;
+
+			Ped ped = Game.Player?.Character;
+			if (ped == null || !ped.Exists()) return;
+
+			// XP per second of the matching activity, spent against SkillProgress's non-linear curve — so
+			// these are relative activity weights, not literal levels. A halted skill earns nothing.
+			const float ActiveRate = 8f;   // core activities (sprint, shoot, drive)
+			const float StrongRate = 12f;  // rarer/harder ones (melee, swimming) climb a touch faster
+			const float EasyEffort = 0.25f; // moving without holding sprint (jog, easy pedal) earns a quarter
+			const float SwimEasy = 0.5f;    // an unhurried swim, half of a sprint-swim
+			const float AimTrickle = 0.25f; // aiming without firing — single shots slip between 500ms samples
+
+			Vehicle veh = ped.IsInVehicle() ? ped.CurrentVehicle : null;
+			// A bicycle is pedal-powered, so it builds Stamina like running (as in the real game), not Driving.
+			// Only actual motor vehicles take the Driving/Flying path.
+			bool onBicycle = veh != null && veh.Exists() && veh.Model.IsBicycle;
+			bool inMotorVehicle = veh != null && !onBicycle;
+
+			// Stamina keys off EFFORT, not speed: holding sprint (the boost input, which fires on foot, on a
+			// bike and while swimming) earns the full rate, easy motion a quarter. On a bike neither gait
+			// native fires, so an easy roll is gated on speed instead. IS_PED_RUNNING is also true while
+			// sprinting, hence the else so a sprint doesn't pay twice.
+			bool sprintingOnFoot = veh == null && GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PED_SPRINTING, ped);
+			bool joggingOnFoot = veh == null && GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PED_RUNNING, ped);
+			bool pedallingHard = onBicycle && GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PED_SPRINTING, ped);
+			bool pedallingEasy = onBicycle && !pedallingHard && veh.Speed > 2f;
+			if (sprintingOnFoot || pedallingHard)
+				EarnSkill(SkillStamina, ActiveRate * seconds);
+			else if (joggingOnFoot || pedallingEasy)
+				EarnSkill(SkillStamina, ActiveRate * EasyEffort * seconds);
+			if (GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PED_SWIMMING_UNDER_WATER, ped)) {
+				// Lung is flat — holding your breath costs the same drifting or sprinting. Stamina is cardio,
+				// so it still keys off effort (sprintingOnFoot already IS the swim-sprint signal: no vehicle).
+				EarnSkill(SkillLung, StrongRate * SwimEasy * seconds);
+				EarnSkill(SkillStamina, ActiveRate * (sprintingOnFoot ? 1f : SwimEasy) * seconds);
+			}
+			// Shooting: firing lands the full rate. IS_PED_SHOOTING is only true on discharge frames, so aiming
+			// pays a trickle too — otherwise a 500ms sample misses most single shots.
+			if (GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PED_SHOOTING, ped))
+				EarnSkill(SkillShooting, ActiveRate * seconds);
+			else if (ped.IsAiming)
+				EarnSkill(SkillShooting, ActiveRate * AimTrickle * seconds);
+			// Strength: melee against a ped. IS_PED_IN_MELEE_COMBAT is a locked-on brawl; GET_MELEE_TARGET_FOR_PED
+			// also catches just swinging at someone without a lock. Neither fires on swings at air or walls (no
+			// cheap flag for that), so Strength stays a fighting stat. A briefly stale target handle can land
+			// one extra sample after a fight — harmless.
+			bool meleeing = GTA.Native.Function.Call<bool>(GTA.Native.Hash.IS_PED_IN_MELEE_COMBAT, ped)
+				|| GTA.Native.Function.Call<int>(GTA.Native.Hash.GET_MELEE_TARGET_FOR_PED, ped) != 0;
+			if (meleeing)
+				EarnSkill(SkillStrength, StrongRate * seconds);
+			// Stealth: the game's own stealth mode is how the native skill grows, so mirror it — plus actually
+			// moving, so crouching in place earns nothing.
+			if (GTA.Native.Function.Call<bool>(GTA.Native.Hash.GET_PED_STEALTH_MOVEMENT, ped) && ped.Speed > 0.1f)
+				EarnSkill(SkillStealth, ActiveRate * seconds);
+			// Driving/Flying: at the wheel over walking pace. A flown aircraft earns Flying, anything else Driving.
+			if (inMotorVehicle && ped.SeatIndex == VehicleSeat.Driver && veh.Speed > 3f) {
+				if (veh.Model.IsPlane || veh.Model.IsHelicopter)
+					EarnSkill(SkillFlying, ActiveRate * seconds);
+				else
+					EarnSkill(SkillDriving, ActiveRate * seconds);
+			}
+
+			// Flush the sub-level XP to disk on its own slow cadence — the value itself lives in skills.dat
+			// (Set persists it), this just checkpoints the fraction toward the next level so a crash doesn't
+			// lose it.
+			if (lastSkillXpSaveMs < 0 || now - lastSkillXpSaveMs >= SkillXpSaveIntervalMs) {
+				lastSkillXpSaveMs = now;
+				skillProgress.Save();
+			}
+		}
+
+		// Give a progressing skill its activity XP and promote any whole levels it crosses straight into
+		// the skill's value (Skills) — so the number the user sees IS the progression, no separate "earned"
+		// concept. Capped at 100; a no-op once maxed or when nothing whole was crossed this sample.
+		void EarnSkill(int skill, float amount) {
+			int current = skills.Get(skill);
+			if (current >= 100) return; // maxed — don't accrue XP past the ceiling
+			int levels = skillProgress.Earn(skill, current, amount);
+			if (levels <= 0) return;
+			int next = Math.Min(100, current + levels);
+			skills.Set(skill, next);
+			Logger.LogDebug($"Skill progressed: {Skills.Labels[skill]} {current} -> {next}.");
 		}
 
 		// === Penalties: simulated story-mode death/arrest costs ===========================
@@ -1717,7 +1871,9 @@ namespace FreemodeIdentity {
 						if (loadoutWeapons && protagonistLoadout.HasWeapons) protagonistLoadout.RestoreWeapons(returned);
 						protagonistLoadout.RestoreVitals(returned, loadoutArmor, loadoutHealth);
 					}
-					if (restoreOriginals && skillsEnabled) {
+					// Restore the protagonist's real skills only if we captured them (i.e. Skills was in use at
+					// enable) — RestoreToGame also refuses a char mismatch, so this can't write onto the wrong one.
+					if (restoreOriginals && protagonistSkills.Captured) {
 						protagonistSkills.RestoreToGame(returnedChar);
 					}
 					// Put their own outfit back — the recreate left them in default clothing. Always on (no
@@ -2002,6 +2158,10 @@ namespace FreemodeIdentity {
 					shim.PushSkills(false, null, null);
 					skillFlushUntilMs = Game.GameTime + SkillFlushTrailMs;
 				}
+				// SyncShim (which normally re-arms the watch clock when it stops pinning) doesn't run while
+				// the master is off, so reset it here — otherwise the first award after re-enabling would
+				// measure elapsed across the entire off period and hand a free skill a lump of unearned XP.
+				lastSkillWatchMs = -1;
 			} else {
 				// Turning the master on is an explicit "make me my identity" — bring vitals back with it,
 				// so re-arm the one-shot the re-apply consumes. Without this a disable/enable re-applies the
@@ -2200,65 +2360,150 @@ namespace FreemodeIdentity {
 			LoadoutMenu.Add(LoadoutPeriodItem);
 		}
 
-		// Skills feature toggle. Off leaves skills untouched (an unset profile is all-zeros, so applying
-		// it would zero a fresh char's skills). On enforces the chosen profile on every look apply.
+		// Skills feature master toggle. Off un-pins (SyncShim stops pinning next tick, the shim restores
+		// each skill's real value) and leaves the story character's skills alone; on enforces the per-skill
+		// setup while spoofed. The per-skill progressing/halted state is independent config below.
 		void SetSkillsEnabled(bool on) {
 			if (on == skillsEnabled) return;
 			skillsEnabled = on;
 			Config.SetValue("Skills", "Enabled", skillsEnabled);
 			Config.Save();
 			if (SkillsEnabledItem != null) SkillsEnabledItem.Checked = skillsEnabled;
-			// No immediate apply needed: SyncShim pushes the pin state to the shim every tick, so flipping
-			// this takes effect on the next tick. Turning off un-pins, and the shim restores each skill's
-			// real value (the protagonist's saved profile) before it stops writing.
 		}
 
-		// 0,5,10..100 — the per-skill setter scale (steps of 5, starting at 0). Both the option values
-		// and the displayed labels.
+		// 0..100 by 1 — the per-skill setter scale AND the displayed value. Steps of 1 (not 5) so the row's
+		// number can show the EXACT climbing value as progression bumps it, not a snapped approximation.
 		static readonly int[] SkillSteps = BuildSkillSteps();
 		static int[] BuildSkillSteps() {
-			var steps = new int[21];
-			for (int i = 0; i < steps.Length; i++) steps[i] = i * 5;
+			var steps = new int[101];
+			for (int i = 0; i < steps.Length; i++) steps[i] = i;
 			return steps;
 		}
+
+		// Per-skill state marker prefixing each row (plain ASCII '>' — the menu font lacks ●/★ glyphs).
+		// GREEN = progressing (free, climbing on its own); YELLOW = halted (pinned to the value shown).
+		// Enter on the row flips between them; both share the trailing "> " so a strip recovers the name.
+		const string SkillMarkerGreen = "~g~>~s~ ";  // progressing
+		const string SkillMarkerYellow = "~y~>~s~ "; // halted / pinned
+
+		// Progression speed presets - the multiplier the user picks, 1x = default pace. Stored as
+		// percent ints so the ini stays integer-clean; the labels are the plain multipliers.
+		static readonly int[] SkillSpeedPercents = { 25, 50, 100, 200, 400 };
+		static readonly string[] SkillSpeedLabels = { "0.25x", "0.5x", "1x", "2x", "4x" };
 
 		void BuildSkillsMenu() {
 			SkillsMenu = new NativeMenu("Skills", "Skills");
 			Pool.Add(SkillsMenu);
 			SkillsMenuItem = MainMenu.AddSubMenu(SkillsMenu);
-			SkillsMenuItem.Description = "Set your character's skill levels — they don't level up on their own.";
+			SkillsMenuItem.Description = "Your character's skills. Scroll a skill to set its value, press Enter to switch it between ~g~progressing~s~ (climbs as you play) and ~y~halted~s~ (held at the value).";
 
+			// Feature master switch. Off leaves your story character's real skills alone; on enforces the
+			// per-skill setup below (halted values + progressing climbs) while spoofed.
 			SkillsEnabledItem = new NativeCheckboxItem("Enabled",
-				"Applies your chosen skill profile (strength, stamina, shooting...) while spoofed - your story character's real skills come back when you turn it off. Set the values below.",
+				"Turns skills on. Each skill below is either ~g~progressing~s~ (climbs as you play) or ~y~halted~s~ (held at its value) - press Enter on one to switch. Progressing slows down as it rises, like the real game. Off gives your story character's real skills back.",
 				skillsEnabled);
 			SkillsEnabledItem.CheckboxChanged += (s, a) => SetSkillsEnabled(SkillsEnabledItem.Checked);
 			SkillsMenu.Add(SkillsEnabledItem);
 
-			// One scrollable 0..100 setter per skill. Scrolling sets the stored value (and the live stat
-			// if we're spoofed), so a change shows in-game at once. NativeListItem<int> renders the int
-			// directly as the label.
+			// One row per skill: the right-hand number IS the skill value (0..100), and it climbs there as a
+			// progressing skill levels up — no separate "earned" readout. Scroll (ItemChanged) sets it,
+			// Enter (Activated) flips progressing/halted. A user scroll continues the climb from the new
+			// value; a programmatic move (us showing the climb) is guarded so it doesn't reset that.
 			SkillItems = new NativeListItem<int>[skills.Count];
 			for (int i = 0; i < skills.Count; i++) {
 				int skill = i; // capture for the closure
 				var item = new NativeListItem<int>(Skills.Labels[i], SkillSteps);
-				item.SelectedIndex = NearestSkillStepIndex(skills.Get(i));
-				item.ItemChanged += (s, a) => SetSkill(skill, SkillSteps[SkillItems[skill].SelectedIndex]);
+				item.SelectedIndex = SkillValueIndex(skills.Get(i));
+				item.Description = SkillRowDescription(i);
+				item.ItemChanged += (s, a) => {
+					if (suppressSkillItemChanged) return; // our own climb-sync, not a user edit
+					SetSkill(skill, SkillSteps[SkillItems[skill].SelectedIndex]);
+				};
+				item.Activated += (s, a) => ToggleSkillProgression(skill);
 				SkillsMenu.Add(item);
 				SkillItems[i] = item;
 			}
+
+			SkillSpeedItem = new NativeListItem<string>("Progression Speed", SkillSpeedLabels);
+			SkillSpeedItem.Description = "How fast the ~g~progressing~s~ skills climb. Higher is faster - affects only skills set to progress, not halted ones.";
+			SkillSpeedItem.SelectedIndex = NearestSkillSpeedIndex((int)(skillProgress.Speed * 100));
+			SkillSpeedItem.ItemChanged += (s, a) => {
+				int pct = SkillSpeedPercents[SkillSpeedItem.SelectedIndex];
+				skillProgress.SetSpeed(pct / 100f);
+				Config.SetValue("Skills", "ProgressSpeedPercent", pct);
+				Config.Save();
+			};
+			SkillsMenu.Add(SkillSpeedItem);
+
+			RefreshSkillLabels();
 		}
 
-		// Snap a stored value (which a hand-edited skills.dat could set to any 0..100) to the nearest
-		// 5-step so the list item lands on a real option.
-		static int NearestSkillStepIndex(int value) {
-			int idx = (value + 2) / 5; // round to nearest step
-			return Math.Max(0, Math.Min(SkillSteps.Length - 1, idx));
+		// Flip a skill between progressing and halted. Freeing keeps its sub-level XP so the climb resumes
+		// where it left off; halting just freezes it at the value it has reached.
+		void ToggleSkillProgression(int skill) {
+			skillProgress.SetLocked(skill, !skillProgress.IsLocked(skill));
+			RefreshSkillLabels();
 		}
 
-		// Persist a skill choice. SyncShim pushes the updated profile to the shim next tick, so a change
-		// shows in-game at once while spoofed + enabled (the shim redirects the GET to the new value).
+		// Snap a stored speed percent to the nearest preset so a hand-edited ini lands on a real option.
+		static int NearestSkillSpeedIndex(int pct) {
+			int best = 0;
+			for (int i = 1; i < SkillSpeedPercents.Length; i++) {
+				if (Math.Abs(SkillSpeedPercents[i] - pct) < Math.Abs(SkillSpeedPercents[best] - pct)) best = i;
+			}
+			return best;
+		}
+
+		// The per-skill row description, colour-coding the current state so a glance shows what Enter does.
+		string SkillRowDescription(int skill) => skillProgress.IsLocked(skill)
+			? "~y~Halted~s~ - held at the value. Press Enter to let it ~g~progress~s~ as you play."
+			: "~g~Progressing~s~ - climbs as you play, from the value shown. Press Enter to ~y~halt~s~ it here.";
+
+		// Repaint each skill row: a GREEN '>' marker when progressing / YELLOW when halted, a state-coloured
+		// description, and the right-hand number synced to the skill's current value (which climbs on its
+		// own for a progressing skill). Called on change and each tick while the menu is open. The value
+		// sync is guarded so moving the list index doesn't fire the setter and reset the climb.
+		void RefreshSkillLabels() {
+			if (SkillItems == null) return;
+			for (int i = 0; i < SkillItems.Length; i++) {
+				if (SkillItems[i] == null) continue;
+				SkillItems[i].Title = (skillProgress.IsLocked(i) ? SkillMarkerYellow : SkillMarkerGreen) + Skills.Labels[i];
+				SkillItems[i].Description = SkillRowDescription(i);
+				int idx = SkillValueIndex(skills.Get(i));
+				if (SkillItems[i].SelectedIndex != idx) {
+					suppressSkillItemChanged = true;
+					SkillItems[i].SelectedIndex = idx;
+					suppressSkillItemChanged = false;
+				}
+			}
+		}
+
+		// The list is 0..100 by 1, so the index IS the value (clamped to a valid row).
+		static int SkillValueIndex(int value) => Math.Max(0, Math.Min(SkillSteps.Length - 1, value));
+
+		// Persist a user-set skill value. SyncShim pushes it to the shim next tick, so a change shows
+		// in-game at once while spoofed + enabled. This value is where a progressing skill climbs from, so
+		// drop the sub-level XP toward the next level — progression continues cleanly from what was just set
+		// rather than jumping a level early on leftover XP.
 		void SetSkill(int skill, int value) {
 			skills.Set(skill, value);
+			skillProgress.ResetSubLevelXp(skill);
+			RefreshSkillLabels();
+		}
+
+		// A skill is "managed" (we pin it) when it's progressing, or halted at a value above 0. A skill
+		// halted at 0 is pass-through — the user isn't setting it, so we leave the character's real value
+		// alone rather than force it to 0. This is what lets one configured skill not zero the other six.
+		bool IsSkillManaged(int skill) => !skillProgress.IsLocked(skill) || skills.Get(skill) > 0;
+
+		// The per-skill stat hashes to pin, with pass-through skills zeroed so the shim skips them (a 0
+		// hash is its no-op signal). Non-managed skills therefore keep the character's real value.
+		int[] EffectiveSkillHashes(int charIdx) {
+			int[] hashes = skills.HashesFor(charIdx);
+			for (int i = 0; i < hashes.Length; i++) {
+				if (!IsSkillManaged(i)) hashes[i] = 0;
+			}
+			return hashes;
 		}
 
 		// Models the Force Model escape hatch can swap to, label -> model name. Order matches

@@ -18,8 +18,8 @@ It merges these jobs into one mod:
   health, and applying your look respawns the ped bare. Freemode Identity keeps them
   for you and restores them with your look.
 - **Skills** - a freemode ped's ability skills (strength, stamina, shooting...) never
-  progress on their own. Freemode Identity lets you set a profile that actually takes
-  effect in gameplay while you're spoofed.
+  progress on their own. Freemode Identity lets you set each one and, if you like, have it
+  **climb as you play** - it earns the skill from the matching activity, all while spoofed.
 
 It does not author looks - that's left to a full customizer (e.g.
 [Menyoo](https://www.gta5-mods.com/scripts/menyoo-pc-sp)). Freemode Identity
@@ -98,14 +98,26 @@ while you're dying, busted or mid-transition, so a half-dead state is never stor
 
 A freemode character's ability skills (strength, stamina, shooting, stealth, flying,
 driving, lung capacity) **never level up** - the game's skill-progression scripts only run
-for a real story protagonist. So rather than preserve earned progress, this feature lets
-you **set a profile**: a value (0-100) per skill that your freemode character reads and
-plays with while spoofed.
+for a real story protagonist. So this feature runs its own: each skill has a value (0-100)
+your freemode character reads and plays with while spoofed, and each can either sit **halted**
+at that value or be left **progressing** so it climbs as you play.
 
-The game reverts these through the normal stat natives, so the native shim writes them
+The game reverts these through the normal stat natives, so the native shim writes the value
 straight into the live stat object each frame - the same place gameplay reads, so a low
-stamina really does limit sprinting. Turning Skills off restores the real values and stops
-touching them, leaving another skills mod free to take over.
+stamina really does limit sprinting.
+
+**Progression** watches what you're doing and earns the matching skill: sprinting (or a hard
+bike or swim) builds Stamina, swimming underwater builds Lung, firing or aiming builds
+Shooting, meleeing builds Strength, moving in stealth builds Stealth, and driving or flying
+build Driving/Flying. Easy effort (a jog, an easy pedal, a drift) earns less than full
+effort. Growth is **not linear** - like the real game it slows as a skill rises, so the last
+levels are a grind. A **Progression Speed** setting (0.25x to 4x) scales the whole climb. The
+value in the menu *is* the progression - it climbs there directly - and you can set a skill by
+hand at any time to continue from a new number. Press **Enter** on a skill to flip it between
+halted and progressing.
+
+Turning Skills off restores the real values and stops touching them, leaving another skills
+mod free to take over.
 
 ## Install
 
@@ -166,10 +178,15 @@ feature); this list names them by feature for clarity.
   - **Weapons**, **Armor**, **Health** (each independently preserved) and **Save Period**
     (how often the carried state is snapshotted).
 - **Skills ▸**
-  - **Enabled** - apply your chosen skill profile while spoofed. **Off by default**
-    (an unset profile is all zeros, which would zero a fresh character).
+  - **Enabled** - run skills while spoofed. **Off by default** (an unset profile is all
+    zeros, which would zero a fresh character).
   - One **0-100 setter per skill** (strength, stamina, shooting, stealth, flying, driving,
-    lung capacity), in steps of 5. Values save immediately and take effect once spoofed.
+    lung capacity). Each carries a coloured `>`: **green** when it's progressing (climbs as
+    you play), **yellow** when it's halted (held at its value). Scroll to set the value,
+    press **Enter** to flip progressing/halted. Values save immediately and take effect once
+    spoofed.
+  - **Progression Speed** - how fast progressing skills climb (0.25x to 4x); halted skills
+    are unaffected.
 - **Spoofing ▸**
   - **Enabled** - read as a protagonist so shops open and jobs pay out. **On by
     default**, so turning the master on is enough to get the wallet working. It records
@@ -193,7 +210,8 @@ under the game tree at launch; this location stays writable on both editions):
 - `loadout.orig.dat` / `skills.orig.dat` / `look.orig.dat` - your story character's own
   gear, skills and outfit (clothes, props, hair), snapshotted when the mod turns on and
   restored to them when it turns off
-- `skills.dat` - your chosen skill profile (one `NAME value` line per skill)
+- `skills.dat` - your chosen skill values (one `NAME value` line per skill)
+- `skillxp.dat` - per-skill progression state (halted/progressing and sub-level XP)
 
 ## Config (`FreemodeIdentity.ini`)
 
@@ -236,8 +254,9 @@ Health = True             ; True | False  - preserve health
 SavePeriodSeconds = 2     ; 1 | 2 | 5 | 10 | 30 | 60  - how often the loadout is snapshotted
 
 [Skills]
-Enabled = False           ; True | False  - apply the skill profile while spoofed
-                          ; (the skill values live in skills.dat, set via the menu)
+Enabled = False              ; True | False  - run skills (set + progression) while spoofed
+ProgressSpeedPercent = 100   ; 25 | 50 | 100 | 200 | 400  - climb speed for progressing skills (100 = 1x)
+                             ; (values + per-skill halt/progress live in skills.dat / skillxp.dat, set via the menu)
 
 [Spoof]
 Enabled = True            ; True | False  - read as a protagonist so shops open
