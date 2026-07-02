@@ -17,7 +17,7 @@ It merges these jobs into one mod:
 - **Loadout** - the game saves none of a freemode character's weapons, armor or
   health, and applying your look respawns the ped bare. Freemode Identity keeps them
   for you and restores them with your look.
-- **Skills** - a freemode ped's ability skills (strength, stamina, shooting...) never
+- **Skills** - a freemode ped's ability skills (stamina, shooting, strength...) never
   progress on their own. Freemode Identity lets you set each one and, if you like, have it
   **climb as you play** - it earns the skill from the matching activity, all while spoofed.
 
@@ -96,7 +96,7 @@ while you're dying, busted or mid-transition, so a half-dead state is never stor
 
 ## Skills
 
-A freemode character's ability skills (strength, stamina, shooting, stealth, flying,
+A freemode character's ability skills (stamina, shooting, strength, stealth, flying,
 driving, lung capacity) **never level up** - the game's skill-progression scripts only run
 for a real story protagonist. So this feature runs its own: each skill has a value (0-100)
 your freemode character reads and plays with while spoofed, and each can either sit **halted**
@@ -180,7 +180,7 @@ feature); this list names them by feature for clarity.
 - **Skills ▸**
   - **Enabled** - run skills while spoofed. **Off by default** (an unset profile is all
     zeros, which would zero a fresh character).
-  - One **0-100 setter per skill** (strength, stamina, shooting, stealth, flying, driving,
+  - One **0-100 setter per skill** (stamina, shooting, strength, stealth, flying, driving,
     lung capacity). Each carries a coloured `>`: **green** when it's progressing (climbs as
     you play), **yellow** when it's halted (held at its value). Scroll to set the value,
     press **Enter** to flip progressing/halted. Values save immediately and take effect once

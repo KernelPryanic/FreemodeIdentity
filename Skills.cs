@@ -19,23 +19,25 @@ namespace FreemodeIdentity {
 		public const string DefaultStoreFileName = "skills.dat";
 		const int FormatVersion = 1;
 
-		// The seven per-character ability stats, in menu order. Name is the SP{N} stat suffix (also
-		// the readable token in the .dat); Hash is joaat("SP{N}_<Name>") per char index. Hashes are
-		// verified against the known cash/bank hashes (same namespace + resolution path).
+		// The seven per-character ability stats, in the game's pause-menu (Stats ▸ Skills) order, so our
+		// menu matches what the player sees there. Name is the SP{N} stat suffix (also the readable token
+		// in the .dat); Hash is joaat("SP{N}_<Name>") per char index. Hashes are verified against the
+		// known cash/bank hashes (same namespace + resolution path). All three arrays and the Skill*
+		// index constants in FreemodeIdentity.cs are index-aligned — reorder them together.
 		public static readonly string[] Names =
-			{ "STRENGTH", "STAMINA", "SHOOTING", "STEALTH", "FLYING", "DRIVING", "LUNG" };
+			{ "STAMINA", "SHOOTING", "STRENGTH", "STEALTH", "FLYING", "DRIVING", "LUNG" };
 		// Friendly labels for the menu (the stat suffix isn't always the in-game name).
 		public static readonly string[] Labels =
-			{ "Strength", "Stamina", "Shooting", "Stealth", "Flying", "Driving", "Lung Capacity" };
+			{ "Stamina", "Shooting", "Strength", "Stealth", "Flying", "Driving", "Lung Capacity" };
 		// joaat("SP{charIdx}_<STAT>") — the stat-suffix differs from the label for a few (WHEELIE =
 		// driving, LUNG_CAPACITY = lung). Indexed [charIdx][skill].
 		static readonly int[][] Hashes = {
-			// SP0 (Michael): STRENGTH STAMINA SHOOTING STEALTH FLYING WHEELIE LUNG_CAPACITY
-			new[] { unchecked((int)0x906B2799), unchecked((int)0x22C8AAA2), unchecked((int)0xB4892709), unchecked((int)0x2268B791), unchecked((int)0x78ABE4E6), unchecked((int)0x11B47270), unchecked((int)0x73968EBD) },
+			// SP0 (Michael): STAMINA SHOOTING STRENGTH STEALTH FLYING WHEELIE LUNG_CAPACITY
+			new[] { unchecked((int)0x22C8AAA2), unchecked((int)0xB4892709), unchecked((int)0x906B2799), unchecked((int)0x2268B791), unchecked((int)0x78ABE4E6), unchecked((int)0x11B47270), unchecked((int)0x73968EBD) },
 			// SP1 (Franklin)
-			new[] { unchecked((int)0xB82874E3), unchecked((int)0x255EFFB5), unchecked((int)0xCB261497), unchecked((int)0xE76D0C23), unchecked((int)0xE98BEE3D), unchecked((int)0x7DD80AC8), unchecked((int)0x6C3BBB1A) },
+			new[] { unchecked((int)0x255EFFB5), unchecked((int)0xCB261497), unchecked((int)0xB82874E3), unchecked((int)0xE76D0C23), unchecked((int)0xE98BEE3D), unchecked((int)0x7DD80AC8), unchecked((int)0x6C3BBB1A) },
 			// SP2 (Trevor)
-			new[] { unchecked((int)0x4F19E159), unchecked((int)0x7D8246AE), unchecked((int)0x2A3A74EA), unchecked((int)0xD03B7EEB), unchecked((int)0x77CF9710), unchecked((int)0x6BEF592F), unchecked((int)0x7E9487B3) },
+			new[] { unchecked((int)0x7D8246AE), unchecked((int)0x2A3A74EA), unchecked((int)0x4F19E159), unchecked((int)0xD03B7EEB), unchecked((int)0x77CF9710), unchecked((int)0x6BEF592F), unchecked((int)0x7E9487B3) },
 		};
 
 		// The chosen profile (0..100 per skill). This is the single shared profile for the freemode

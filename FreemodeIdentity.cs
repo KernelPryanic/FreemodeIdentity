@@ -56,8 +56,8 @@ namespace FreemodeIdentity {
 		// are earned, so the number the user sees is the progression.
 		readonly SkillProgress skillProgress = new SkillProgress(Skills.Names.Length);
 		// Skill indices into Skills.Names/values — the activity watcher awards XP by name, not position.
-		// MUST match the order in Skills.Names { STRENGTH, STAMINA, SHOOTING, STEALTH, FLYING, DRIVING, LUNG }.
-		const int SkillStrength = 0, SkillStamina = 1, SkillShooting = 2, SkillStealth = 3,
+		// MUST match the order in Skills.Names { STAMINA, SHOOTING, STRENGTH, STEALTH, FLYING, DRIVING, LUNG }.
+		const int SkillStamina = 0, SkillShooting = 1, SkillStrength = 2, SkillStealth = 3,
 			SkillFlying = 4, SkillDriving = 5, SkillLung = 6;
 		// The genuine protagonist's real skills, snapshotted at enable and written back on disable so
 		// returning to them restores THEIR values authoritatively. Persisted to its own file so it
