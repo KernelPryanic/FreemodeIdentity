@@ -73,8 +73,8 @@ namespace FreemodeIdentity {
 		// unpin (itself a skill change) doesn't leave the widget stuck. Re-armed every frame while pinned.
 		int skillFlushUntilMs = -1;
 		const int SkillFlushTrailMs = 1500;
-		// Feed ids to sweep past our own newest when clearing the skill banner (see SweepSkillWidget) —
-		// wide enough to catch its re-posts, small enough to stay cheap.
+		// How many feed ids below the live head to sweep when clearing the skill banner (see
+		// SweepSkillWidget) — covers a few frames of banner re-posts, small enough to stay cheap.
 		const int SkillWidgetSweepSpan = 8;
 		// Progression activity watcher: throttled so it costs a handful of cheap natives a few times a
 		// second, not every frame (heed the per-frame-cost work — no memory walks here). We award XP as
@@ -183,20 +183,39 @@ namespace FreemodeIdentity {
 		static void Warn(string tag, string detail) => TrackFeedPost(GTA.UI.Notification.PostTicker($"~y~{tag}~s~ {detail}", false));
 		static void Fail(string tag, string detail) => TrackFeedPost(GTA.UI.Notification.PostTicker($"~r~{tag}~s~ {detail}", false));
 
-		// Track the highest feed id we've posted, so SweepSkillWidget can tell our own tickers (at or below
-		// it) from the game's skill-up banner (posted just above it) and only remove the latter.
-		static int highestOwnFeedId = -1;
+		// Remember the ids of tickers WE post so the banner sweep can spare them. A small ring is plenty —
+		// only very recent tickers are still on-screen when a sweep runs, and old ids age out.
+		const int OwnFeedIdMemory = 12;
+		static readonly int[] ownFeedIds = new int[OwnFeedIdMemory];
+		static int ownFeedIdCursor;
 		static void TrackFeedPost(FeedPost post) {
-			if (post.Handle > highestOwnFeedId) highestOwnFeedId = post.Handle;
+			if (post == null) return; // PostTicker can return null before the feed is ready
+			ownFeedIds[ownFeedIdCursor] = post.Handle;
+			ownFeedIdCursor = (ownFeedIdCursor + 1) % OwnFeedIdMemory;
+		}
+		static bool IsOwnFeedId(int id) {
+			for (int i = 0; i < OwnFeedIdMemory; i++) if (ownFeedIds[i] == id) return true;
+			return false;
 		}
 
-		// Clear the game's re-posted skill-up banner without a full-queue flush (which was eating our wallet
-		// tickers). Feed ids rise monotonically, so the banner sits just above our newest ticker: sweeping
-		// the span past highestOwnFeedId hits it and spares ours. REMOVE_ITEM on a dead id is a no-op.
+		// Clear the game's re-posted skill-up banner without a full-queue flush (which ate our wallet
+		// tickers). The banner re-posts every frame with an ever-rising feed id, so a window anchored to our
+		// own last ticker goes stale whenever nothing else posts (e.g. cruising a bike) and the banner
+		// escapes it. Instead read the LIVE head from a throwaway ticker, then remove the span just below it
+		// where this frame's banner sits, sparing our own tickers. REMOVE_ITEM on a dead id is a no-op.
 		static void SweepSkillWidget() {
-			int from = highestOwnFeedId + 1;
-			for (int id = from; id < from + SkillWidgetSweepSpan; id++) {
-				GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_REMOVE_ITEM, id);
+			// A feed hiccup must never abort OnTick — that would strand the disable/restore path (a throw
+			// here once wiped a protagonist's stats/gear). A missed sweep only flickers the banner.
+			try {
+				FeedPost probe = GTA.UI.Notification.PostTicker(" ", false);
+				if (probe == null) return; // feed not ready yet
+				int head = probe.Handle;
+				GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_REMOVE_ITEM, head); // remove the probe itself
+				for (int id = head - 1; id > head - 1 - SkillWidgetSweepSpan; id--) {
+					if (!IsOwnFeedId(id)) GTA.Native.Function.Call(GTA.Native.Hash.THEFEED_REMOVE_ITEM, id);
+				}
+			} catch {
+				// swallow — see Logger discipline
 			}
 		}
 		static void NotifyBusy() => Notify("Snapshot still saving - try again in a moment.");
@@ -1099,7 +1118,10 @@ namespace FreemodeIdentity {
 			if (pinSkills) {
 				skillFlushUntilMs = Game.GameTime + SkillFlushTrailMs;
 			}
-			if (Game.GameTime < skillFlushUntilMs) {
+			// Hold the sweep off during the appearance switch: posting/removing a feed item every frame
+			// while the model is swapping and streaming churns the HUD feed at the worst moment. The banner
+			// isn't a concern mid-swap; the trail resumes clearing it once the switch settles.
+			if (Game.GameTime < skillFlushUntilMs && !appearanceSwitching) {
 				SweepSkillWidget();
 			}
 
