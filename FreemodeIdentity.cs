@@ -643,6 +643,9 @@ namespace FreemodeIdentity {
 				// all are done.
 				if (MoodMemory.IsRunning) { MoodMemory.Tick(); return; }
 				if (PedHeadBlendMemory.FindRunning) { PedHeadBlendMemory.TickFind(); return; }
+				// Diagnostic sweep (Debug menu). Runs on the same tick budget as the finders so a
+				// multi-gigabyte scan can't trip the watchdog.
+				if (PedHeadBlendMemory.SweepRunning) { PedHeadBlendMemory.TickSweep(); return; }
 				if (SnapshotPending) {
 					Ped pp = Game.Player?.Character;
 					if (pp != null) {
@@ -1465,6 +1468,12 @@ namespace FreemodeIdentity {
 					// can't round-trip. Apply will keep the ped's current face rather than restore one.
 					Warn($"Saved \"{slotName}\" without the face",
 						"- this face can't be preserved. Build one with the heritage sliders or the in-game creator. Clothes, hair and props were saved.");
+				} else if (!ad.HeadDataFromMemory) {
+					// The head-blend struct wasn't located, so every field only memory exposes fell back
+					// to its default — and the hair tint's default is palette 0, black. Silently saving
+					// that is what turns this into a "my hair colour won't save" report days later.
+					Warn($"Saved \"{slotName}\" without the face detail",
+						"- hair colour, face sliders and overlay opacity couldn't be read from this ped and were left at defaults. Save the slot again; if it keeps happening, send the log.");
 				} else {
 					Notify($"Saved appearance \"{slotName}\"");
 				}
@@ -2584,6 +2593,22 @@ namespace FreemodeIdentity {
 			forceItem.Description = "Recovery escape hatch - press Enter to forcibly become the selected model. ~y~Comes back with default appearance~s~ - use Disable to return with your own look.";
 			forceItem.Activated += (s, a) => ForceModel(ForceModelNames[forceItem.SelectedIndex]);
 			DebugMenu.Add(forceItem);
+
+			// Diagnostic: locate the head blend by sweeping memory for this ped's heritage triple,
+			// independent of whether the finder can reach it, then log who points at what it finds.
+			// Manual because it's a multi-gigabyte scan, and only meaningful on a distinctive face.
+			NativeItem sweepItem = new NativeItem("Find Head-Blend Path") {
+				Description = "Diagnostic - sweeps memory for this character's face data and logs where it sits. Takes a while; use on a ~y~distinctive~s~ character, then send the log."
+			};
+			sweepItem.Activated += (s, a) => {
+				Ped p = Game.Player?.Character;
+				if (p == null) {
+					return;
+				}
+				Notify("Sweeping memory for the head blend - watch the log.");
+				PedHeadBlendMemory.BeginSweep(p);
+			};
+			DebugMenu.Add(sweepItem);
 
 			NativeItem openDataFolder = new NativeItem("Open Data Folder") {
 				Description = "Opens the folder holding the slots, config, logs and saved state."
