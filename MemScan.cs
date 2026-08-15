@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 
 namespace FreemodeIdentity {
 	// Crash-proof process-memory primitives. Union of the two source mods' helpers:
-	// the appearance side needs the pointer-graph walk / region sweep / snapshot reads;
+	// the appearance side needs the region sweep / snapshot reads;
 	// the spoof + shim side needs the gated u32/i32 reads and the VirtualProtect-flipping
 	// write. Kept as one class so there is a single memory-safety gate for the whole mod.
 	//
@@ -178,9 +178,37 @@ namespace FreemodeIdentity {
 			return trimmed;
 		}
 
-		// One committed, readable memory region: its base and size. Used by content scans
-		// that must sweep process memory (e.g. the decoration-array probe) rather than walk
-		// a pointer graph from the ped.
+		// Gate granularity for SnapshotInto. Snapshot re-checks every 4KB page, which is right when
+		// following a pointer of unknown provenance but is the dominant cost when sweeping hundreds
+		// of megabytes: one VirtualQuery per page is ~150k syscalls per 600MB against a process with
+		// a huge, churning address space, and it held the head-blend scan to ~5MB/s. 64KB keeps a
+		// gate on every read while cutting those syscalls 16x.
+		//
+		// The trade is a wider TOCTOU window: 64KB rather than 4KB of "checked, not yet copied". The
+		// callers are region sweeps over the game's own committed heap, which is not being unmapped
+		// under us in normal play; a pointer chase must still use Snapshot.
+		const int SweepGateBytes = 0x10000;
+
+		// Snapshot into a caller-owned buffer, returning how many bytes were read. Exists so a scan
+		// sweeping hundreds of megabytes can reuse ONE buffer — allocating a fresh 1MB array per
+		// region puts every one of them on the large object heap, and over a few thousand small
+		// regions that allocation cost dominated the scan itself.
+		public static int SnapshotInto(IntPtr addr, byte[] dest, int len) {
+			len = Math.Min(len, dest.Length);
+			int done = 0;
+			while (done < len) {
+				int chunk = Math.Min(SweepGateBytes, len - done);
+				if (!IsReadable(addr + done, chunk)) {
+					break;
+				}
+				Marshal.Copy(addr + done, dest, done, chunk);
+				done += chunk;
+			}
+			return done;
+		}
+
+		// One committed, readable memory region: its base and size. Used by the content scans that
+		// sweep process memory — the decoration-array probe and the head-blend finder.
 		public struct Region {
 			public IntPtr Base;
 			public long Size;
@@ -222,46 +250,5 @@ namespace FreemodeIdentity {
 			}
 		}
 
-		// Breadth-first walk of the pointer graph rooted at the ped object, up to a few
-		// hops deep, yielding every unique readable block. The CPedHeadBlendData struct
-		// hangs off the ped via the extension list (ped+16 → list → array → entry →
-		// struct), so a few hops reach it without knowing the exact list layout. Bounded
-		// by a visited-set and a hard cap so it always terminates.
-		public static IEnumerable<IntPtr> WalkPointerGraph(IntPtr root, int maxHops = 4, int maxBlocks = 4000) {
-			const int BlockScanBytes = 0x80 * 8; // bytes read per block to follow further pointers
-			var seen = new HashSet<long>();
-			var frontier = new List<IntPtr> { root };
-			seen.Add(root.ToInt64());
-			int yielded = 0;
-
-			for (int hop = 0; hop <= maxHops; hop++) {
-				var next = new List<IntPtr>();
-				foreach (IntPtr block in frontier) {
-					yield return block;
-					if (++yielded >= maxBlocks) {
-						yield break;
-					}
-					// Snapshot the block ONCE, then read child pointers from the managed buffer.
-					// The old code did a VirtualQuery (SafeReadPtr→IsReadable) per qword — 128 syscalls
-					// per block × thousands of blocks = the scan's dominant cost and FPS hit. One
-					// page-gated copy + a cheap range pre-filter cuts the syscalls by ~100x; only
-					// plausible pointers pay a VirtualQuery (in LooksLikeHeapPtr) before being followed.
-					byte[] buf = Snapshot(block, BlockScanBytes);
-					for (int off = 0; off + 8 <= buf.Length; off += 8) {
-						long raw = BitConverter.ToInt64(buf, off);
-						if ((raw & 7) != 0 || raw <= 0x10000 || raw >= 0x7FFFFFFFFFFF) {
-							continue; // not an 8-aligned user-range pointer — skip without a syscall
-						}
-						if (seen.Add(raw) && LooksLikeHeapPtr((IntPtr)raw)) {
-							next.Add((IntPtr)raw);
-						}
-					}
-				}
-				if (next.Count == 0) {
-					yield break;
-				}
-				frontier = next;
-			}
-		}
 	}
 }

@@ -50,7 +50,7 @@ namespace FreemodeIdentity {
 		// (not wall-clock), so it finds-or-doesn't identically on any CPU — a slow machine just
 		// spreads the same 2000 blocks over more frames; it never false-misses what a fast CPU finds.
 		const int MaxBlocks = 2000;
-		// Per-tick wall-clock slice. The pointer reads are cheap now (WalkPointerGraph/this BFS read
+		// Per-tick wall-clock slice. The pointer reads are cheap now (this BFS reads
 		// children from a single snapshot, not a syscall per qword), so a modest slice clears the
 		// whole capped scan in ~1-2 ticks — a brief blip, not the long FPS-tax a tiny slice caused
 		// by dribbling the work across hundreds of frames.

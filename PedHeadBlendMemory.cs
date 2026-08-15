@@ -9,17 +9,18 @@ namespace FreemodeIdentity {
 	// overlay tint colour ids and the hair tint ids. The native capture path (PedAppearance)
 	// handles everything the game DOES expose; this fills the rest.
 	//
-	// HOW the struct is found (GTA V ENHANCED, build 1013.34):
+	// HOW the struct is found:
 	// The Enhanced exe is packed/encrypted on disk, so the FiveM/Legacy byte patterns
 	// (fwExtensionList::Get + the extension-id global) cannot be derived statically and do
 	// not exist in the decrypted runtime layout either — Game.FindPattern fails for them.
-	// Instead we locate the struct BY CONTENT: GET_PED_HEAD_BLEND_DATA already returns the
-	// ped's three heritage MIX floats (shape/skin/third), whose exact bit patterns are a
-	// rare, layout-agnostic fingerprint. We walk the ped's pointer graph (the struct hangs
-	// off ped+16's extension list) and find the three mix floats stored consecutively;
-	// that location IS inside the live CPedHeadBlendData. All other fields are then read at
-	// offsets relative to that mix-start, derived empirically from two live samples + the
-	// native getters as ground truth (see the project's struct-layout note).
+	// Nor can the struct be reached from the ped: full-memory sweeps on three characters found
+	// NOTHING in CPed pointing at it, so it is not an extension a pointer walk can follow.
+	// So we locate it BY CONTENT: GET_PED_HEAD_BLEND_DATA already returns the ped's three
+	// heritage MIX floats (shape/skin/third), whose exact bit patterns, together with the
+	// ped's overlay indices and eye colour, are a fingerprint precise enough that it passed
+	// exactly once in 8GB on each of those three characters. We scan memory around the ped
+	// for it; all other fields are read at offsets relative to that mix-start, derived
+	// empirically from live samples + the native getters as ground truth.
 	//
 	// SAFETY: every memory access goes through MemScan, which VirtualQuery-gates each read
 	// (an unmapped pointer would otherwise raise an uncatchable access violation that kills
@@ -43,27 +44,39 @@ namespace FreemodeIdentity {
 		const int OffHairColour = 0x110;    // u8 hair tint primary palette id
 		const int OffHairHighlight = 0x111; // u8 hair tint secondary palette id
 
+		// Highest eye-colour palette index a real ped can hold. SET_PED_EYE_COLOR takes 0-31; the
+		// bound is doubled so a future palette can grow without rejecting a genuine struct, and it
+		// is still nowhere near the 0xFFFF a fill region reads as. Used as a find-time sanity gate,
+		// never to clamp a captured value.
+		const int MaxEyeColourIndex = 63;
+
 		// How far past the mix-start the struct extends (hair highlight at 0x111 + margin);
 		// the snapshot we read must cover it. A small fixed window — the struct is contiguous.
 		const int StructSpan = 0x120;
 
-		// The mix triple must be findable somewhere in a reachable block; this bounds how
-		// far into each candidate block we scan for it.
-		const int BlockScanBytes = 0x400;
+		// ---- How the struct is located ---------------------------------------------------
+		// By scanning memory NEAR THE PED for the fingerprint — not by walking the ped's pointer
+		// graph, which is what earlier builds did and what produced every wrong capture in this
+		// subsystem's history.
+		//
+		// Measured, three characters, full 8GB sweeps: the fingerprint passed exactly ONCE each
+		// time, on the right struct (hair tints matched the saved slots), and NOTHING in the ped
+		// pointed at it — CPedHeadBlendData lives in its own pool that CPed doesn't reference in
+		// any way a pointer walk can follow. So the walk could only ever find the struct by luck,
+		// and on a ped whose fields are all defaults it instead found zero-filled regions and saved
+		// those: EyeColor=65535, a black hair tint, a face that wouldn't round-trip.
+		//
+		// The pool sits close to the ped in absolute terms (~299MB in the samples, all three within
+		// 680KB of each other), so a bounded window around the ped finds it in a fraction of a
+		// second while a full sweep takes minutes. The radius is far wider than any observed delta
+		// because it's cheap to scan and the cost of missing is a lost face.
+		const long FindRadius = 0x20000000; // ±512MB around the ped
+		const long RegionChunk = 0x100000;
 
-		// Pointer-graph walk bounds for locating the mix-start. Block-count caps (CPU-independent):
-		// the struct is reached within a few hops. The block ORDINAL at which it's reached varies with
-		// BFS ordering — observed 125-345 on a male but 1434 on a female (same struct address, later
-		// in traversal). 1500 nearly clipped that, so the cap is 3000 for safe margin; the cheap
-		// overlay pre-filter makes each block fast, so a higher cap costs little when the ped is found
-		// early and only matters in the rare deep case.
-		// 6 hops, not 4: on Legacy the CPedHeadBlendData hangs DEEPER in the ped's pointer graph
-		// (found at 5-6 hops; the 4-hop walk never reached it and the face silently fell back to
-		// defaults). Enhanced reaches it earlier, so the extra hops are harmless there — they only
-		// matter if the early hops miss. Block cap stays 3000 (Legacy finds it at ~177, Enhanced
-		// within ~1500), CPU-independent.
-		const int MaxHops = 6;
-		const int MaxFindBlocks = 3000;
+		// The mix anchor sits 0x28 into CPedHeadBlendData (six u32 blend ids at 0x10-0x27, then the
+		// shape/skin/third mix floats). Only used to report the struct base in diagnostics.
+		const int MixOffsetInStruct = 0x28;
+
 
 		static bool Initialized;
 		static bool available;
@@ -88,29 +101,28 @@ namespace FreemodeIdentity {
 			// we can read process memory, which MemScan always can on a live game. Kept as
 			// a flag so callers and the startup log have a single yes/no to report.
 			available = true;
-			Logger.Log("PedHeadBlendMemory: content-based head-blend read armed (Enhanced layout).");
+			// Layout-agnostic by construction: the anchor is located by CONTENT (the heritage mix
+			// triple + the ped's overlay fingerprint), and every field is read relative to it, so
+			// the same offsets serve both editions. Nothing here is edition-specific to report.
+			Logger.Log("PedHeadBlendMemory: content-based head-blend read armed.");
 		}
 
 		// ---- Tick-driven mix-start finder ------------------------------------------------
-		// Locating the struct walks the ped's pointer graph scanning for the heritage mix triple.
-		// That is exactly the kind of heavy content scan that must NOT run synchronously inside a
-		// snapshot: when the ped's task graph is large/churning (e.g. right after a moving style is
-		// applied in a trainer) the walk balloons and racing the churn can fault the game with an
-		// uncatchable access violation. So the find runs tick-driven and time-sliced, off the
-		// snapshot hot path, the same way mood and the tattoo base are found. BeginFind starts it;
-		// FillFromMix consumes MixResult once FindRunning is false.
-
-		// Per-tick wall-clock slice for the walk. With a DEFAULT heritage (0,0,0) the triple matches
-		// constantly, so each block pays many candidate checks — at 20ms/tick that spread a ~1400-block
-		// walk over ~24s of real time. A bigger slice (still far under SHVDN's 5s tick watchdog) clears
-		// the same walk in a couple of ticks: a brief one-time blip behind the "Preparing snapshot"
-		// ticker instead of a long grind. The snapshot is user-initiated and already shows a wait, so a
-		// ~300ms hitch is acceptable; the result is cached for the session.
+		// Scanning tens of megabytes must NOT run synchronously inside a snapshot — a long
+		// synchronous scan trips SHVDN's 5s tick watchdog, and racing the ped's churn while reading
+		// its memory is how this subsystem has faulted the game before. So the find runs tick-driven
+		// and time-sliced, off the snapshot hot path, the same way mood and the tattoo base are
+		// found. BeginFind starts it; TryFill consumes the result once FindRunning is false.
 		const long FindBudgetMs = 300;
 
 		static bool findRunning;
-		static int findBlocks; // blocks walked this find — for the FOUND/NOT-found diagnostic log
-		static IEnumerator<IntPtr> findWalker;
+		static long findBytes;  // scanned this find — for the FOUND/NOT-found diagnostic log
+		// A not-found needs to say WHICH failure it was, or the next report can't be acted on:
+		// zero triple hits = the scan never covered the struct (a reach problem), hits that all got
+		// rejected = we covered it and the fingerprint disagreed (a layout problem).
+		static int findTripleHits, findRejects;
+		static int findStartMs; // Game.GameTime the scan armed — the FOUND log reports the real cost
+		static IEnumerator<MemScan.Region> findRegions;
 		static float findShape, findSkin, findThird;
 		// The ped's real per-slot overlay drawable indices, read from the native getter
 		// (GET_PED_HEAD_OVERLAY, 255 = none). Used as a STRONG, ped-specific fingerprint at find
@@ -118,6 +130,10 @@ namespace FreemodeIdentity {
 		// overlay-value array at OffOverlayValue must equal exactly these natively-read values — a
 		// 13-byte ped-specific signature that random memory will not reproduce.
 		static readonly byte[] findOverlayValues = new byte[PedAppearance.OverlayCount];
+		// This ped's eye colour from GET_HEAD_BLEND_EYE_COLOR — the one head-blend field that has
+		// both a getter AND a value that varies per ped, so it discriminates where the overlay array
+		// can't. -1 = the getter gave nothing usable this pass.
+		static int findEyeColour = -1;
 		static long findPed;
 		static IntPtr mixResult;
 
@@ -166,7 +182,7 @@ namespace FreemodeIdentity {
 		public static void BeginFind(Ped ped) {
 			mixResult = IntPtr.Zero;
 			foundStruct = null;
-			findWalker = null;
+			findRegions = null;
 			findRunning = false;
 			findTargetPed = null;
 			settleStartMs = -1;
@@ -181,18 +197,25 @@ namespace FreemodeIdentity {
 			}
 		}
 
-		// Read the heritage + overlay fingerprint and, if the heritage is valid, either consume the
-		// session cache or arm the pointer-graph walk. Returns true when the find is resolved or armed
-		// (caller stops waiting), false when the heritage isn't readable yet (keep settling).
-		static bool ArmWalk() {
-			Ped ped = findTargetPed;
-			if (ped == null || !ped.Exists() || ped.MemoryAddress == IntPtr.Zero) {
-				findRunning = false;
-				return true;
-			}
+		// Read everything about this ped that identifies its head blend: the heritage triple, the
+		// overlay drawable indices and the eye colour. Returns false — with lastRejectedMix set to
+		// why — when the blend isn't readable yet, so callers keep settling instead of searching for
+		// something that isn't there.
+		static bool PrepareFingerprint(Ped ped) {
 			OutputArgument arg = OutputArgument.AllocForType<HeadBlendData>();
-			Function.Call(Hash.GET_PED_HEAD_BLEND_DATA, ped, arg);
+			// The RETURN value is the question we've been searching memory to answer: whether this ped
+			// has a CPedHeadBlendData at all. A freemode ped only gets one once a blend is applied to
+			// it, so a ped built outside the head-blend system has no struct to find — and searching
+			// for one that doesn't exist is exactly how a zero-filled region ends up in a saved slot.
+			bool hasBlend = Function.Call<bool>(Hash.GET_PED_HEAD_BLEND_DATA, ped, arg);
 			HeadBlendData d = arg.GetResultAsBlittableStruct<HeadBlendData>();
+			if (!hasBlend) {
+				// Treated as not-ready rather than a hard stop: right after a model switch the ped is
+				// still initialising and this flips true a beat later. The settle budget bounds it, and
+				// its give-up log names this as the reason.
+				lastRejectedMix = "no head-blend data on this ped (GET_PED_HEAD_BLEND_DATA returned false)";
+				return false;
+			}
 			findShape = d.ShapeMix;
 			findSkin = d.SkinMix;
 			findThird = d.ThirdMix;
@@ -213,6 +236,22 @@ namespace FreemodeIdentity {
 				int idx = Function.Call<int>(Hash.GET_PED_HEAD_OVERLAY, ped, slot);
 				findOverlayValues[slot] = (byte)(idx < 0 || idx > 255 ? 255 : idx);
 			}
+			findEyeColour = Function.Call<int>(Hash.GET_HEAD_BLEND_EYE_COLOR, ped);
+			return true;
+		}
+
+		// Read the heritage + overlay fingerprint and, if the heritage is valid, either consume the
+		// session cache or arm the pointer-graph walk. Returns true when the find is resolved or armed
+		// (caller stops waiting), false when the heritage isn't readable yet (keep settling).
+		static bool ArmWalk() {
+			Ped ped = findTargetPed;
+			if (ped == null || !ped.Exists() || ped.MemoryAddress == IntPtr.Zero) {
+				findRunning = false;
+				return true;
+			}
+			if (!PrepareFingerprint(ped)) {
+				return false;
+			}
 
 			findPed = ped.MemoryAddress.ToInt64();
 			if (cachedPed == findPed && cachedMix != IntPtr.Zero && MixMatches(cachedMix)) {
@@ -223,14 +262,139 @@ namespace FreemodeIdentity {
 				Logger.LogDebug($"PedHeadBlendMemory: mix cache HIT (mix={cachedMix.ToInt64():X}).");
 				return true;
 			}
-			Logger.LogDebug($"PedHeadBlendMemory: mix cache MISS (heritage={findShape},{findSkin},{findThird}) — walking graph.");
-			findBlocks = 0;
-			// Tight block cap: the mix-start is reached EARLY once the hop depth is right (Enhanced
-			// 128-330, Legacy ~177), so 3000 is comfortable margin while bailing the not-found case
-			// (e.g. a non-freemode ped slipping through) fast. Block-count, so it behaves identically
-			// on slow CPUs. (The earlier Legacy "not found" was a HOP-depth shortfall, not this cap.)
-			findWalker = MemScan.WalkPointerGraph(ped.MemoryAddress, MaxHops, MaxFindBlocks).GetEnumerator();
+			// The scan identifies the struct purely by content, so it can only run on a ped that HAS
+			// content. On one with default heritage, no overlays and no eye colour every byte the
+			// fingerprint compares is a default, so a match proves nothing — the scan wouldn't find
+			// the struct, it would find A match and save whatever that region held (measured: a black
+			// hair tint and EyeColor=65535 written into a slot). Keeping defaults and saying so is
+			// the honest outcome.
+			if (!HasDistinguishingContent()) {
+				Logger.Log("PedHeadBlendMemory: this ped has nothing to identify its head blend by (default heritage, " +
+					"no overlays, no eye colour); keeping defaults rather than guessing.");
+				findRunning = false;
+				return true;
+			}
+			findBytes = 0;
+			findTripleHits = 0;
+			findRejects = 0;
+			findRegions = RegionsNear(ped.MemoryAddress, FindRadius).GetEnumerator();
+			findStartMs = Game.GameTime;
+			Logger.LogDebug($"PedHeadBlendMemory: scanning near the ped (heritage={findShape:G9},{findSkin:G9},{findThird:G9}, " +
+				$"eye={findEyeColour}, hint={(DeltaHint() == 0 ? "none" : "ped+0x" + DeltaHint().ToString("X"))}).");
 			return true;
+		}
+
+		// Does this ped carry anything a CONTENT search could identify its head blend by? Heritage
+		// that isn't the default triple, any overlay actually set, or a readable eye colour. With
+		// none of the three, every byte the fingerprint compares is a default value and a match
+		// proves nothing.
+		static bool HasDistinguishingContent() {
+			if (findShape != 0f || findSkin != 0f || findThird != 0f) {
+				return true;
+			}
+			if (findEyeColour >= 0 && findEyeColour <= MaxEyeColourIndex) {
+				return true;
+			}
+			for (int i = 0; i < PedAppearance.OverlayCount; i++) {
+				if (findOverlayValues[i] != 255) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// ---- Full-memory sweep (diagnostic, user-invoked) --------------------------------
+		// The probe can only report who points at a struct we already found, so on a ped the finder
+		// misses it tells us nothing — exactly the ped we need the path for. This sweeps every
+		// committed private read-write region for the heritage triple instead, which does not depend
+		// on the struct being reachable from the ped at all, then probes each hit. Slow and
+		// deliberately manual: it exists to derive the offsets, not to run during a save.
+		//
+		// Only meaningful on a DISTINCTIVE character. With default heritage the triple is 0,0,0 and
+		// the sweep would report thousands of zero runs.
+		const long SweepBudgetMs = 200;
+		// Counts only hits that PASS the fingerprint. The bare triple matches in creator buffers,
+		// script globals and save data — capping on raw hits stopped two sweeps inside the first
+		// 40MB and reported "done" without ever reaching the struct.
+		const int SweepMaxPasses = 4;
+
+		static bool sweepRunning;
+		static IEnumerator<MemScan.Region> sweepRegions;
+		static long sweepBytes;
+		static int sweepHits;
+		static Ped sweepPed;
+
+		public static bool SweepRunning => sweepRunning;
+
+		public static void BeginSweep(Ped ped) {
+			sweepRunning = false;
+			sweepRegions = null;
+			sweepBytes = 0;
+			sweepHits = 0;
+			sweepPed = ped;
+			if (ped == null || !ped.Exists() || ped.MemoryAddress == IntPtr.Zero) {
+				Logger.Log("PedHeadBlendMemory: sweep needs a live ped.");
+				return;
+			}
+			findTargetPed = ped;
+			if (!PrepareFingerprint(ped)) {
+				Logger.Log($"PedHeadBlendMemory: sweep aborted — head blend not readable ({lastRejectedMix}).");
+				return;
+			}
+			if (!HasDistinguishingContent()) {
+				Logger.Log("PedHeadBlendMemory: sweep aborted — this ped has default heritage, no overlays and no eye " +
+					"colour, so the triple matches everywhere. Run it on a distinctive character.");
+				return;
+			}
+			// Unbounded (radius 0) but still nearest-first, so a sweep that does find something finds
+			// it early and its ped-delta is comparable with the finder's radius.
+			findTripleHits = 0;
+			findRejects = 0;
+			sweepRegions = RegionsNear(ped.MemoryAddress, 0).GetEnumerator();
+			sweepRunning = true;
+			Logger.Log($"PedHeadBlendMemory: sweep started (heritage={findShape:G9},{findSkin:G9},{findThird:G9}, " +
+				$"eye={findEyeColour}, ped={ped.MemoryAddress.ToInt64():X}).");
+		}
+
+		public static void TickSweep() {
+			if (!sweepRunning) {
+				return;
+			}
+			try {
+				var sw = System.Diagnostics.Stopwatch.StartNew();
+				while (sw.ElapsedMilliseconds < SweepBudgetMs && sweepRegions.MoveNext()) {
+					MemScan.Region r = sweepRegions.Current;
+					int len = MemScan.SnapshotInto(r.Base, scanBytes, (int)Math.Min(r.Size, RegionChunk));
+					sweepBytes += len;
+					IntPtr cand = ScanBuffer(r.Base, scanBytes, len);
+					if (cand == IntPtr.Zero) {
+						continue;
+					}
+					SaveDeltaHint(cand.ToInt64() - sweepPed.MemoryAddress.ToInt64());
+					// Where the struct sits relative to the ped — the number the per-save finder's
+					// search radius is sized from.
+					long delta = cand.ToInt64() - sweepPed.MemoryAddress.ToInt64();
+					Logger.Log($"PedHeadBlendMemory: sweep PASS mix={cand.ToInt64():X} " +
+						$"(base {cand.ToInt64() - MixOffsetInStruct:X}, ped{(delta < 0 ? "-" : "+")}0x{Math.Abs(delta):X} = {delta / 0x100000}MB, " +
+						$"hairTint={MemScan.Snapshot(cand, StructSpan)[OffHairColour]}).");
+					ProbePointerPath(sweepPed, cand);
+					if (++sweepHits >= SweepMaxPasses) {
+						Logger.Log($"PedHeadBlendMemory: sweep stopped at {SweepMaxPasses} passes after {sweepBytes / 0x100000}MB.");
+						sweepRunning = false;
+						sweepRegions = null;
+						return;
+					}
+				}
+				if (sw.ElapsedMilliseconds < SweepBudgetMs) {
+					Logger.Log($"PedHeadBlendMemory: sweep finished — {sweepHits} pass(es) across {sweepBytes / 0x100000}MB.");
+					sweepRunning = false;
+					sweepRegions = null;
+				}
+			} catch (Exception e) {
+				Logger.LogError("PedHeadBlendMemory.TickSweep: " + e);
+				sweepRunning = false;
+				sweepRegions = null;
+			}
 		}
 
 		// Cheap revalidation: does the cached mix address still look like a real CPedHeadBlendData?
@@ -269,6 +433,21 @@ namespace FreemodeIdentity {
 					return false;
 				}
 			}
+			// That signature collapses on the ped it matters most for: a DEFAULT-heritage ped with no
+			// overlays fingerprints as twelve zero bytes then thirteen 0xFF bytes, which any zero or
+			// fill region reproduces. Observed live — a block passed every check above and captured
+			// EyeColor=65535 with a hair tint to match, which is how a wrong colour reached a saved
+			// slot. Eye colour is the field that separates them, and unlike the hair tint the game
+			// DOES expose a getter for it, so it can be matched against this ped exactly.
+			// Only when the getter actually returned a palette index. A ped whose eye colour was never
+			// set reads -1 from the getter AND 0xFFFF in the struct — both are "unset", so rejecting
+			// an out-of-range field would throw away the REAL struct on exactly the ped that has
+			// nothing else to identify it by. Discriminating that ped is HasDistinguishingContent's
+			// job, not this check's.
+			if (findEyeColour >= 0 && findEyeColour <= MaxEyeColourIndex &&
+				BitConverter.ToUInt16(s, OffEyeColour) != findEyeColour) {
+				return false;
+			}
 			// And the morph array must be PLAUSIBLE morph data, not denormal noise that merely falls
 			// in range. A real morph is 0 or a normal float in [-1.5,1.5]; reject NaN, out-of-range,
 			// and sub-normal tiny magnitudes (|v| < 1e-6 but nonzero) that signal reinterpreted bytes.
@@ -290,11 +469,11 @@ namespace FreemodeIdentity {
 			if (!findRunning) {
 				return;
 			}
-			// SETTLE phase: the walk isn't armed yet because the heritage wasn't readable (ped just
+			// SETTLE phase: the scan isn't armed yet because the heritage wasn't readable (ped just
 			// switched/spawned). Retry reading it each tick until it's valid, then ArmWalk() either
-			// resolves from cache or sets findWalker for the walk below. Bounded so a blend-less ped
-			// gives up instead of holding the snapshot forever.
-			if (findWalker == null && mixResult == IntPtr.Zero) {
+			// resolves from cache or arms the region scan below. Bounded so a blend-less ped gives up
+			// instead of holding the snapshot forever.
+			if (findRegions == null && mixResult == IntPtr.Zero) {
 				if (ArmWalk()) {
 					// Resolved (cache hit) or armed the walk. If it cleared findRunning (cache hit /
 					// dead ped), we're done; otherwise fall through next tick into the walk.
@@ -313,56 +492,41 @@ namespace FreemodeIdentity {
 			}
 			try {
 				var sw = System.Diagnostics.Stopwatch.StartNew();
-				while (sw.ElapsedMilliseconds < FindBudgetMs && findWalker.MoveNext()) {
-					findBlocks++;
-					byte[] buf = MemScan.Snapshot(findWalker.Current, BlockScanBytes);
-					for (int off = 0; off + 12 <= buf.Length; off += 4) {
-						if (FloatEq(BitConverter.ToSingle(buf, off), findShape) &&
-							FloatEq(BitConverter.ToSingle(buf, off + 4), findSkin) &&
-							FloatEq(BitConverter.ToSingle(buf, off + 8), findThird)) {
-							// Triple matched — but with default heritage (0,0,0) that's a false-positive
-							// magnet hitting constantly. Before paying for the full LooksLikeStruct (a
-							// fresh 0x120-byte VirtualQuery-gated snapshot + 13 overlay + 20 morph checks),
-							// do a CHEAP reject straight from the block buffer we already have: the overlay
-							// drawable-value bytes at OffOverlayValue must match the ped fingerprint. This
-							// kills the vast majority of zero-run false matches without a syscall, which is
-							// what made the default-heritage walk grind. (Only when the bytes lie within the
-							// scanned buffer; otherwise fall through to the authoritative check.)
-							int ovEnd = off + OffOverlayValue + PedAppearance.OverlayCount;
-							if (ovEnd <= buf.Length && !OverlayBytesMatch(buf, off + OffOverlayValue)) {
-								continue;
-							}
-							IntPtr cand = findWalker.Current + off;
-							if (!LooksLikeStruct(cand)) {
-								continue;
-							}
-							mixResult = cand;
-							cachedPed = findPed;   // cache for cheap reuse on later snapshots
-							cachedMix = mixResult;
-							// Snapshot the struct NOW. The deferred decoration capture that runs after this
-							// find churns the ped and can relocate the struct, so reading it later (in
-							// TryFill) would hit a stale address. Capture the final bytes here instead.
-							foundStruct = MemScan.Snapshot(cand, StructSpan);
-							findRunning = false;
-							findWalker = null;
-							Logger.LogDebug($"PedHeadBlendMemory: mix FOUND after {findBlocks} blocks (mix={cand.ToInt64():X}).");
-							return;
-						}
+				while (sw.ElapsedMilliseconds < FindBudgetMs && findRegions.MoveNext()) {
+					MemScan.Region r = findRegions.Current;
+					int len = MemScan.SnapshotInto(r.Base, scanBytes, (int)Math.Min(r.Size, RegionChunk));
+					findBytes += len;
+					IntPtr cand = ScanBuffer(r.Base, scanBytes, len);
+					if (cand == IntPtr.Zero) {
+						continue;
 					}
-					if (sw.ElapsedMilliseconds >= FindBudgetMs) {
-						return; // resume next tick from the same enumerator
-					}
+					SaveDeltaHint(cand.ToInt64() - findPed);
+					mixResult = cand;
+					cachedPed = findPed;   // cache for cheap reuse on later snapshots
+					cachedMix = cand;
+					// Snapshot the struct NOW. The deferred decoration capture that runs after this
+					// find churns the ped and can relocate the struct, so reading it later (in
+					// TryFill) would hit a stale address. Capture the final bytes here instead.
+					foundStruct = MemScan.Snapshot(cand, StructSpan);
+					findRunning = false;
+					findRegions = null;
+					Logger.LogDebug($"PedHeadBlendMemory: mix FOUND after {findBytes / 0x100000}MB in {Game.GameTime - findStartMs}ms " +
+						$"(mix={cand.ToInt64():X}, ped+0x{cand.ToInt64() - findPed:X}, eye={findEyeColour}, " +
+						$"hairTint={foundStruct[OffHairColour]}/{foundStruct[OffHairHighlight]}).");
+					return;
 				}
-				// MoveNext returned false within budget: graph exhausted, not found.
+				// Enumerator ended within budget: every region in range scanned, not found.
 				if (sw.ElapsedMilliseconds < FindBudgetMs) {
 					findRunning = false;
-					findWalker = null;
-					Logger.Log($"PedHeadBlendMemory: mix NOT found after {findBlocks} blocks (graph exhausted).");
+					findRegions = null;
+					Logger.Log($"PedHeadBlendMemory: mix NOT found in {findBytes / 0x100000}MB around the ped " +
+						$"(heritage triple hit {findTripleHits}x, {findRejects} rejected by fingerprint). " +
+						"Run Debug > Find Head-Blend Path to search all of memory.");
 				}
 			} catch (Exception e) {
 				Logger.LogError("PedHeadBlendMemory.TickFind: " + e);
 				findRunning = false;
-				findWalker = null;
+				findRegions = null;
 			}
 		}
 
@@ -400,8 +564,15 @@ namespace FreemodeIdentity {
 			}
 
 			// Eye colour as the live palette index (the native getter agrees with this, but
-			// reading it here keeps everything from one consistent snapshot).
-			ad.EyeColor = BitConverter.ToUInt16(s, OffEyeColour);
+			// reading it here keeps everything from one consistent snapshot). Only when it IS a
+			// palette index: the native capture already put a good value in, so an out-of-range
+			// read must not replace it — that is what wrote EyeColor=65535 into a saved slot.
+			int eye = BitConverter.ToUInt16(s, OffEyeColour);
+			if (eye <= MaxEyeColourIndex) {
+				ad.EyeColor = eye;
+			} else {
+				Logger.LogError($"PedHeadBlendMemory: eye colour {eye} out of range; keeping the natively captured {ad.EyeColor}.");
+			}
 
 			// Hair tint palette ids — no native getter exposes these (only RGB, which the
 			// setter can't take), so memory is the only source. They sit immediately after
@@ -437,20 +608,185 @@ namespace FreemodeIdentity {
 			return true;
 		}
 
-		static bool FloatEq(float a, float b) {
-			return Math.Abs(a - b) < 0.0005f;
+		// ---- Pointer-path probe (diagnostic) ---------------------------------------------
+		// The content search exists because CPedHeadBlendData is a RAGE extension: separately
+		// allocated, its pointer parked in the list at ped+0x10, so there is no fixed ped offset
+		// to read. That is only true as far as we've looked, though — if the pointer turns out to
+		// sit somewhere STABLE relative to the ped, reading it directly replaces the whole search
+		// and with it the false-positive lottery on a default-heritage ped.
+		//
+		// So: having located the struct the slow way on a ped whose fingerprint we trust, look for
+		// who POINTS at it, directly in the ped and one hop out, and log the offsets. An offset
+		// that repeats across different characters is the static path we're after. Read-only,
+		// Debug-only, once per successful find — it costs nothing in normal play.
+		// Reach: a probe that reports "0 references" is only meaningful if it looked far enough, and
+		// the first pass didn't — it found the reference on one ped instance and none on another.
+		const int ProbePedBytes = 0x8000;   // how far into CPed to look for the pointer
+		const int ProbeChildBytes = 0x800;  // how far into each child block to look
+		const int ProbeMaxChildren = 1024;  // bound the one-hop sweep
+		const int ProbeMaxHits = 24;        // don't flood the log if the struct is widely referenced
+		// A pointer to the struct won't point at the mix float itself but at the struct BASE, some
+		// way above it. Accept anything landing in a window around the anchor and report the delta.
+		const int ProbeWindowBefore = 0x400;
+
+		static void ProbePointerPath(Ped ped, IntPtr mix) {
+			if (Logger.Threshold > LogLevel.Debug || ped == null || !ped.Exists()) {
+				return;
+			}
+			try {
+				IntPtr pedAddr = ped.MemoryAddress;
+				if (pedAddr == IntPtr.Zero) {
+					return;
+				}
+				long lo = mix.ToInt64() - ProbeWindowBefore;
+				long hi = mix.ToInt64() + StructSpan;
+				long pedBase = pedAddr.ToInt64();
+				int hits = 0;
+
+				byte[] pedBuf = MemScan.Snapshot(pedAddr, ProbePedBytes);
+				var children = new List<KeyValuePair<int, IntPtr>>();
+				for (int off = 0; off + 8 <= pedBuf.Length; off += 8) {
+					long raw = BitConverter.ToInt64(pedBuf, off);
+					if (raw >= lo && raw <= hi) {
+						Logger.LogDebug($"PedHeadBlendMemory: probe — ped+0x{off:X} -> struct ({DeltaToMix(raw, mix)}), ped={pedBase:X}");
+						hits++;
+					} else if ((raw & 7) == 0 && raw > 0x10000 && raw < 0x7FFFFFFFFFFF && children.Count < ProbeMaxChildren) {
+						children.Add(new KeyValuePair<int, IntPtr>(off, (IntPtr)raw));
+					}
+				}
+
+				// One hop out: the extension list is exactly this shape — a pointer in the ped to a
+				// node that holds the pointer we want. Report the full two-step path.
+				foreach (KeyValuePair<int, IntPtr> child in children) {
+					if (hits >= ProbeMaxHits) {
+						break;
+					}
+					byte[] childBuf = MemScan.Snapshot(child.Value, ProbeChildBytes);
+					for (int off = 0; off + 8 <= childBuf.Length; off += 8) {
+						long raw = BitConverter.ToInt64(childBuf, off);
+						if (raw < lo || raw > hi) {
+							continue;
+						}
+						Logger.LogDebug($"PedHeadBlendMemory: probe — ped+0x{child.Key:X} -> +0x{off:X} -> struct ({DeltaToMix(raw, mix)})");
+						if (++hits >= ProbeMaxHits) {
+							break;
+						}
+					}
+				}
+				Logger.LogDebug($"PedHeadBlendMemory: probe — {hits} reference(s) to the struct found (ped={pedBase:X}, mix={mix.ToInt64():X}).");
+			} catch (Exception e) {
+				Logger.LogError("PedHeadBlendMemory.ProbePointerPath: " + e);
+			}
 		}
 
-		// Cheap pre-filter: do the 13 overlay drawable-value bytes at `start` in the already-read
-		// block buffer match this ped's native overlay fingerprint? Used to reject the flood of
-		// coincidental heritage-triple matches before the expensive full struct snapshot.
-		static bool OverlayBytesMatch(byte[] buf, int start) {
-			for (int i = 0; i < PedAppearance.OverlayCount; i++) {
-				if (buf[start + i] != findOverlayValues[i]) {
-					return false;
+		// Where a referenced address sits relative to the mix anchor, in HEX — the number is compared
+		// against struct offsets, and a decimal one reads as a different value entirely.
+		static string DeltaToMix(long raw, IntPtr mix) {
+			long delta = raw - mix.ToInt64();
+			return delta < 0 ? $"mix-0x{-delta:X}" : $"mix+0x{delta:X}";
+		}
+
+		// ---- Buffer scanning -------------------------------------------------------------
+		// One buffer pair for every scan, allocated once. Both are large-object-heap sized, so
+		// allocating them per region — which is what a nearest-first scan does thousands of times —
+		// cost more than the scanning did (measured 5MB/s that way, against 56MB/s over big regions).
+		static readonly byte[] scanBytes = new byte[RegionChunk];
+		static readonly int[] scanInts = new int[RegionChunk / 4];
+
+		// Which of the three mix floats to match on. Matching on a zero component would hit every
+		// zero run in memory and turn the scan into a fingerprint-check grind, so anchor on a
+		// non-zero one and verify the other two around it.
+		static int AnchorIndex() {
+			if (findSkin != 0f) return 1;
+			if (findShape != 0f) return 0;
+			return 2;
+		}
+
+		// Find the mix anchor in `buf` (a snapshot taken at `origin`), or Zero. Exact bit match on
+		// the anchor float — these floats come out of the same struct the native read them from, so
+		// they match bit-for-bit — then FloatEq on its neighbours, then the full fingerprint.
+		static IntPtr ScanBuffer(IntPtr origin, byte[] buf, int length) {
+			int anchor = AnchorIndex();
+			float anchorValue = anchor == 0 ? findShape : anchor == 1 ? findSkin : findThird;
+			int anchorBits = BitConverter.ToInt32(BitConverter.GetBytes(anchorValue), 0);
+			int n = length / 4;
+			Buffer.BlockCopy(buf, 0, scanInts, 0, n * 4);
+			for (int i = anchor; i + (2 - anchor) < n; i++) {
+				if (scanInts[i] != anchorBits) {
+					continue;
+				}
+				int off = (i - anchor) * 4;
+				if (!FloatEq(BitConverter.ToSingle(buf, off), findShape) ||
+					!FloatEq(BitConverter.ToSingle(buf, off + 4), findSkin) ||
+					!FloatEq(BitConverter.ToSingle(buf, off + 8), findThird)) {
+					continue;
+				}
+				findTripleHits++;
+				IntPtr cand = origin + off;
+				if (LooksLikeStruct(cand)) {
+					return cand;
+				}
+				findRejects++;
+			}
+			return IntPtr.Zero;
+		}
+
+		// Where the head blend sat relative to its ped, last time we found one. Purely an ORDERING
+		// hint — the fingerprint still decides — so a stale or wrong hint costs a little scanning,
+		// never a wrong answer. Persisted because the pool has landed in the same band across
+		// sessions (0x12Bxxxxx / 0x12Dxxxxx observed), which turns the first save of a session from
+		// hundreds of megabytes of scanning into a few.
+		static long deltaHint;
+		static bool deltaHintLoaded;
+		static string HintPath => ScriptPaths.For("headblend.hint");
+
+		static long DeltaHint() {
+			if (!deltaHintLoaded) {
+				deltaHintLoaded = true;
+				try {
+					string text = System.IO.File.Exists(HintPath) ? System.IO.File.ReadAllText(HintPath).Trim() : null;
+					long parsed;
+					if (!string.IsNullOrEmpty(text) && long.TryParse(text, System.Globalization.NumberStyles.HexNumber,
+							System.Globalization.CultureInfo.InvariantCulture, out parsed)) {
+						deltaHint = parsed;
+					}
+				} catch {
+					// A missing or unreadable hint just means an unordered first scan.
 				}
 			}
-			return true;
+			return deltaHint;
+		}
+
+		static void SaveDeltaHint(long delta) {
+			if (delta == deltaHint) {
+				return;
+			}
+			deltaHint = delta;
+			try {
+				System.IO.File.WriteAllText(HintPath, delta.ToString("X"));
+			} catch {
+				// Only an optimisation; never let it break a save.
+			}
+		}
+
+		// Committed private read-write regions worth scanning for this ped, ordered by how close
+		// they are to where the struct was last found (or to the ped itself, with no hint). The
+		// radius bounds a miss.
+		static List<MemScan.Region> RegionsNear(IntPtr pedAddr, long radius) {
+			long origin = pedAddr.ToInt64() + DeltaHint();
+			long ped = pedAddr.ToInt64();
+			var regions = new List<MemScan.Region>();
+			foreach (MemScan.Region r in MemScan.EnumerateRegions(RegionChunk, writableOnly: true, privateOnly: true)) {
+				if (radius <= 0 || Math.Abs(r.Base.ToInt64() - ped) <= radius) {
+					regions.Add(r);
+				}
+			}
+			regions.Sort((a, b) => Math.Abs(a.Base.ToInt64() - origin).CompareTo(Math.Abs(b.Base.ToInt64() - origin)));
+			return regions;
+		}
+
+		static bool FloatEq(float a, float b) {
+			return Math.Abs(a - b) < 0.0005f;
 		}
 
 		// Smallest normal float; anything nonzero below it is an IEEE subnormal. See IsValidMix.
