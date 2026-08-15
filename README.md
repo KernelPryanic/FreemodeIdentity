@@ -33,15 +33,17 @@ native `.asi` shim does the one thing managed code can't (see *How spending work
 
 Model (Freemode Male/Female), heritage (face shape + skin tone), the 20 face
 micro-morphs, head overlays (brows, makeup, beard, wrinkles) with tint + opacity,
-hair drawable/texture and tint, eye colour, voice, clothing components, props,
-moving style, mood, and tattoos.
+hair drawable/texture and tint, eye colour, voice, clothing components (including
+masks and clothing decals), props, moving style, mood, and tattoos.
 
 Most of it is read back through native getters. A few fields the game exposes **no
 getter** for - the micro-morphs, overlay tint/opacity, hair tint, moving style, mood,
 and tattoos - are read directly from the live ped's memory. Every memory read is
 bounds-checked and locates its data by content (not a hard-coded address), so a read that
 doesn't line up falls back to native-only capture rather than writing anything wrong. The
-heavier scans run off the main thread across frames, so saving never freezes the game.
+heavier scans are spread across frames so they can't trip the script watchdog; a save is
+normally instant, but a character the scan has to work hard for can stutter for a moment
+first (see *Known limitations*).
 
 A Menyoo **randomizer** face (and addon/custom models) lives outside the head-blend
 system and can't round-trip; the mod detects this, warns at save time, and leaves the
@@ -166,7 +168,9 @@ feature); this list names them by feature for clarity.
     memory reads. Moving Style and Tattoos are quick reads and **on by default**; Mood is a
     brief scan and **off by default**.
   - **Edit Mode** - pauses the re-apply and drops the spoof so an external tool (Menyoo)
-    can change the ped freely. Save your look, then turn it off.
+    can change the ped freely. **Save your look before turning it off** - turning it off
+    resumes the re-apply, which restores the *saved* look, so anything you changed and
+    didn't save (a bag, an outfit) is discarded.
 - **Wallet ▸**
   - **Enabled** - earn from pickups and route shop charges to the wallet while
     spoofing. Off makes the wallet inert.
@@ -295,6 +299,12 @@ commit builds and publishes a release - the tag is the version source of truth.
   baked into the model and can't be captured.
 - **Menyoo randomizer / trainer faces don't round-trip** - they bypass the head-blend
   system, so the face isn't captured. The mod warns and saves the rest of the look.
+- **A character with no distinguishing features is slow to save, and may not keep its
+  face detail.** The face detail the game has no getter for is found by matching your
+  character's own values in memory, so a ped with default heritage, no overlays *and* eye
+  colour 0 has nothing to match on: the search widens (the save stutters for a few seconds)
+  and, if more than one candidate fits, the mod keeps the defaults rather than guessing and
+  says so. Giving the character any eye colour other than 0 avoids both.
 - **No spending with the wallet off.** A freemode ped can't actually spend a
   protagonist's real cash; only the wallet redirect makes charges stick.
 - **Some charges bypass the stat entirely.** A few interactions (e.g. a prostitute's
