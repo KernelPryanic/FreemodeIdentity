@@ -179,22 +179,25 @@ namespace FreemodeIdentity {
 					Hash = hash,
 					Ammo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON, ped, hash),
 					Tint = Function.Call<int>(Hash.GET_PED_WEAPON_TINT_INDEX, ped, hash),
-					Name = ResolveName(Weapon.GetDisplayNameFromHash(wh)),
+					Name = WeaponName(wh, hash),
 					Components = CaptureComponents(ped, weapon),
 				});
 			}
 			return captured;
 		}
 
-		// Whether an enumerated hash is a genuine weapon. A transitional ped (mid model-swap) reports garbage
-		// inventory hashes whose display name is the game's "Invalid" sentinel — checked as both the raw
-		// label and its localized text, since a garbage hash resolves to the sentinel either way.
+		// Whether an enumerated hash is a genuine weapon — asked of the GAME, which is the only thing that
+		// knows. A transitional ped (mid model-swap) reports garbage inventory hashes, and one of those
+		// poisoning the store is the bug this guards.
+		//
+		// It used to ask the display-name table instead, and that table lives in the SHVDN library, not the
+		// game: it only knows the weapons shipped in the WeaponHash enum, so an ADD-ON weapon registered by
+		// another mod resolved to the same "Invalid" sentinel as garbage. Since one bad hash discards the
+		// whole read, carrying a single add-on weapon meant nothing was ever saved — no weapons, no armor,
+		// no health. IS_WEAPON_VALID reads the game's own weapon table, where add-on weapons are registered
+		// and garbage is not.
 		static bool IsRealWeapon(WeaponHash wh) {
-			string label = Weapon.GetDisplayNameFromHash(wh);
-			if (string.IsNullOrEmpty(label) || label == "WTT_INVALID" || label == "Invalid") {
-				return false;
-			}
-			return Game.GetLocalizedString(label) != "Invalid";
+			return Function.Call<bool>(Hash.IS_WEAPON_VALID, (uint)wh);
 		}
 
 		// The attachments actually fitted to this weapon. The candidate list comes from SHVDN's
@@ -223,6 +226,13 @@ namespace FreemodeIdentity {
 		// Resolve a weapon/component display-name LABEL (e.g. "WT_PIST") to its localized text ("Pistol")
 		// for the readability comment only. Falls back to the raw label, then "?", when the text system
 		// has no entry — the comment is decoration, so a miss is cosmetic and never affects restore.
+		// Readability only — the hash is the source of truth and the loader never reads this back. An
+		// add-on weapon isn't in the library's name table, so write its hash rather than "Invalid".
+		static string WeaponName(WeaponHash wh, uint hash) {
+			string name = ResolveName(Weapon.GetDisplayNameFromHash(wh));
+			return name == "Invalid" || name == "?" ? "0x" + hash.ToString("X8") : name;
+		}
+
 		static string ResolveName(string label) {
 			if (string.IsNullOrEmpty(label)) {
 				return "?";
