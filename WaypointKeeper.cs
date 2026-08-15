@@ -12,7 +12,8 @@ namespace FreemodeIdentity {
 	// duplicate): when the spoof engages, rewrite the freemode-keyed entry's modelHash to the
 	// protagonist hash so the lookup hits; on release, rewrite it back. Same single blip throughout.
 	//
-	// Layout (from SHVDN NativeMemory): each entry has modelHash at +0x00, blipHandle at +0x04.
+	// Layout and the Legacy patterns below come from ScriptHookVDotNet Enhanced's NativeMemory.cs
+	// (zlib — see THIRD-PARTY-NOTICES.md): each entry has modelHash at +0x00, blipHandle at +0x04.
 	// Legacy keeps a contiguous range (stride 0x18), resolved here by Game.FindPattern (plaintext
 	// .text). Enhanced unrolls it into four separate entry globals whose addresses the native shim
 	// resolves from the decrypted .text and hands over (Game.FindPattern can't read it).

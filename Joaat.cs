@@ -8,7 +8,8 @@ namespace FreemodeIdentity {
 	// value, and the source string is NOT kept at runtime, so the only way back from a
 	// stored hash to a usable name is to hash candidate names and match), and the
 	// protagonist model / pickup-type / stat name hashes (the wallet + spoof side).
-	// Mirrors SHVDN's StringHash.AtStringHash (verified against the cloned library source).
+	// Adapted from ScriptHookVDotNet Enhanced's StringHash.AtStringHash (zlib — see
+	// THIRD-PARTY-NOTICES.md).
 	static class Joaat {
 		// Maps ASCII uppercase → lowercase and '\\' → '/'; identity elsewhere. Same table
 		// the game uses, so our hashes match the engine's.

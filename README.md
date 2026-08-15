@@ -328,5 +328,9 @@ on the wallet, nothing extra to integrate. Cash and bank both resolve to the one
 ## License
 
 MIT - see [LICENSE](LICENSE). You're free to use, modify and redistribute, including in
-your own mods, as long as you keep the copyright and licence notice. The bundled MinHook
-in `native/third_party/minhook/` is under its own BSD-2-Clause licence (kept alongside it).
+your own mods, as long as you keep the copyright and licence notice.
+
+Some parts are adapted from ScriptHookVDotNet Enhanced (zlib) - its notice is in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), and each file says where it derives
+from at the point it derives. The bundled MinHook in `native/third_party/minhook/` is
+under its own BSD-2-Clause licence (kept alongside it).

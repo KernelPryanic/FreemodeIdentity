@@ -13,7 +13,9 @@
 //
 // Enhanced inlines/unrolls the array access into four separate rip-relative loads (Legacy keeps a
 // contiguous start..end range, resolved in C# via Game.FindPattern — the shim does nothing there).
-// Patterns mirror SHVDN NativeMemory.cs's Enhanced waypoint resolution.
+// Patterns adapted from ScriptHookVDotNet Enhanced's NativeMemory.cs (zlib — see
+// THIRD-PARTY-NOTICES.md). Altered: re-expressed as shim-side signature scans over the decrypted
+// .text, with the rip-relative decode below.
 namespace {
 
 // First entry: `lea rdx,[rip+disp]; cmp dword [rdx+rax*..],..`. disp at +3, instr len 7.
