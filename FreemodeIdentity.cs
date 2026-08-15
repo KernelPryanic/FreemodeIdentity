@@ -2558,7 +2558,7 @@ namespace FreemodeIdentity {
 			DebugMenu = new NativeMenu("Debug", "Debug");
 			Pool.Add(DebugMenu);
 			NativeItem anchor = MainMenu.AddSubMenu(DebugMenu);
-			anchor.Description = "Log level, live identity read-outs, and a force-model escape hatch.";
+			anchor.Description = "Log level, the data folder, live identity read-outs, and a force-model escape hatch.";
 
 			// --- Interactive controls (top) ---
 			// Log level — write-through to the ini + Logger so verbosity changes need no rebuild.
@@ -2584,6 +2584,18 @@ namespace FreemodeIdentity {
 			forceItem.Description = "Recovery escape hatch - press Enter to forcibly become the selected model. ~y~Comes back with default appearance~s~ - use Disable to return with your own look.";
 			forceItem.Activated += (s, a) => ForceModel(ForceModelNames[forceItem.SelectedIndex]);
 			DebugMenu.Add(forceItem);
+
+			NativeItem openDataFolder = new NativeItem("Open Data Folder") {
+				Description = "Opens the folder holding the slots, config, logs and saved state."
+			};
+			openDataFolder.Activated += (s, a) => {
+				try {
+					System.Diagnostics.Process.Start(ScriptPaths.DataDirectory);
+				} catch (Exception ex) {
+					Logger.LogError("Could not open the data folder: " + ex);
+				}
+			};
+			DebugMenu.Add(openDataFolder);
 
 			// --- Read-only live status rows (bottom; text refreshed each tick by RefreshDebugMenu) ---
 			DbgSeenAsItem = AddInfoRow("Game sees you as", "Which identity your model reads as now.");

@@ -193,13 +193,15 @@ feature); this list names them by feature for clarity.
     intent and engages once you're a freemode character - safe to leave on as a story
     protagonist (it just won't engage until you're not).
   - **Target** - which protagonist to impersonate.
-- **Debug ▸** - log level, live identity read-outs, and a force-model escape hatch.
+- **Debug ▸** - log level, **Open Data Folder**, live identity read-outs, and a
+  force-model escape hatch.
 
 ## Files
 
 Slots, config and logs live **outside** the game folder, under
 `%APPDATA%\GTA V Mods\KernelPryanic\FreemodeIdentity\` (Enhanced locks files written
-under the game tree at launch; this location stays writable on both editions):
+under the game tree at launch; this location stays writable on both editions).
+**Debug ▸ Open Data Folder** opens it:
 
 - `Appearances\<name>.xml` - one file per slot (`<name>.bak.xml` is its backup)
 - `FreemodeIdentity.ini` - config
