@@ -341,13 +341,19 @@ namespace FreemodeIdentity {
 
 		// ---- Apparel -----------------------------------------------------------
 
-		// Component slots a snapshot captures. Face/Head/Hair are head-creation
-		// slots handled elsewhere; clothing is Torso, Legs, Hands, Shoes, the two
-		// specials and the second torso layer.
+		// Component slots a snapshot captures. Face and Hair are head-creation slots handled
+		// elsewhere; everything a freemode ped WEARS belongs here.
+		//
+		// Head and Textures are easy to leave out and were: SHVDN's names describe the story-ped
+		// layout, but on a freemode ped slot 1 ("berd") is the MASK and slot 10 ("decl") is the
+		// clothing decal/logo. Omitting them meant masks and decals were never saved — and never
+		// cleared on apply either, so one put on during Edit Mode stayed stuck through every
+		// restore, since a slot we don't write keeps whatever the ped already had.
 		static readonly PedComponentType[] ApparelSlots = {
-			PedComponentType.Torso, PedComponentType.Legs, PedComponentType.Hands,
-			PedComponentType.Shoes, PedComponentType.Special1, PedComponentType.Special2,
-			PedComponentType.Special3, PedComponentType.Torso2,
+			PedComponentType.Head, PedComponentType.Torso, PedComponentType.Legs,
+			PedComponentType.Hands, PedComponentType.Shoes, PedComponentType.Special1,
+			PedComponentType.Special2, PedComponentType.Special3, PedComponentType.Textures,
+			PedComponentType.Torso2,
 		};
 
 		public static void ApplyComponents(Ped ped, AppearanceData ad) {
