@@ -219,11 +219,16 @@ namespace FreemodeIdentity {
 		// scan). Skips guard/no-access pages. Heap data (where the decoration array lives) is
 		// in PAGE_READWRITE regions; pass writableOnly to skip read-only/image/code regions and
 		// keep the sweep small.
-		public static IEnumerable<Region> EnumerateRegions(long maxRegionSize = 0x100000, bool writableOnly = true, bool privateOnly = false) {
+		//
+		// startAddr/endAddr bound the WALK, not just the results. A caller searching a window
+		// around one address (the head-blend finder) would otherwise pay a full 128TB VirtualQuery
+		// crawl — thousands of calls, and a Region list an order of magnitude longer than the
+		// window — to then discard nearly all of it. endAddr 0 means "to the top".
+		public static IEnumerable<Region> EnumerateRegions(long maxRegionSize = 0x100000, bool writableOnly = true, bool privateOnly = false, long startAddr = 0, long endAddr = 0) {
 			const uint PAGE_WRITABLE_REGION = 0x04 | 0x08 | 0x40 | 0x80; // RW, WC, EX-RW, EX-WC
 			const uint MEM_PRIVATE = 0x20000; // not a mapped file/image — the heap, where the decoration array lives
-			long cur = 0x10000;
-			const long userMax = 0x7FFFFFFFFFFF;
+			long cur = Math.Max(0x10000, startAddr);
+			long userMax = endAddr > 0 ? Math.Min(endAddr, 0x7FFFFFFFFFFF) : 0x7FFFFFFFFFFF;
 			while (cur < userMax) {
 				MEMORY_BASIC_INFORMATION mbi;
 				if (VirtualQuery((IntPtr)cur, out mbi, MbiSize) == IntPtr.Zero) {
@@ -241,8 +246,12 @@ namespace FreemodeIdentity {
 				if (committed && readable && !guarded && (!writableOnly || writable) && (!privateOnly || isPrivate)) {
 					long off = 0;
 					while (off < regionSize) {
+						long chunkBase = mbi.BaseAddress.ToInt64() + off;
+						if (chunkBase >= userMax) {
+							break;
+						}
 						long chunk = Math.Min(maxRegionSize, regionSize - off);
-						yield return new Region { Base = (IntPtr)(mbi.BaseAddress.ToInt64() + off), Size = chunk };
+						yield return new Region { Base = (IntPtr)chunkBase, Size = chunk };
 						off += chunk;
 					}
 				}

@@ -122,6 +122,19 @@ namespace FreemodeIdentity {
 		// rejected = we covered it and the fingerprint disagreed (a layout problem).
 		static int findTripleHits, findRejects;
 		static int findStartMs; // Game.GameTime the scan armed — the FOUND log reports the real cost
+		// Where a scan's milliseconds actually went. This subsystem has now been "optimised" twice
+		// against a guessed bottleneck; splitting region enumeration from the gated copy from the
+		// buffer scan means the next slow report names the culprit instead of inviting another guess.
+		static long findReadTicks, findScanTicks, findEnumMs;
+		static int findRegionCount;
+
+		static string Cost() {
+			long perMs = System.Diagnostics.Stopwatch.Frequency / 1000;
+			if (perMs <= 0) {
+				perMs = 1;
+			}
+			return $"{findRegionCount} regions: enum {findEnumMs}ms, read {findReadTicks / perMs}ms, scan {findScanTicks / perMs}ms";
+		}
 		static IEnumerator<MemScan.Region> findRegions;
 		static float findShape, findSkin, findThird;
 		// The ped's real per-slot overlay drawable indices, read from the native getter
@@ -277,10 +290,17 @@ namespace FreemodeIdentity {
 			findBytes = 0;
 			findTripleHits = 0;
 			findRejects = 0;
-			findRegions = RegionsNear(ped.MemoryAddress, FindRadius).GetEnumerator();
+			findReadTicks = 0;
+			findScanTicks = 0;
+			var enumSw = System.Diagnostics.Stopwatch.StartNew();
+			List<MemScan.Region> regions = RegionsNear(ped.MemoryAddress, FindRadius);
+			findEnumMs = enumSw.ElapsedMilliseconds;
+			findRegionCount = regions.Count;
+			findRegions = regions.GetEnumerator();
 			findStartMs = Game.GameTime;
 			Logger.LogDebug($"PedHeadBlendMemory: scanning near the ped (heritage={findShape:G9},{findSkin:G9},{findThird:G9}, " +
-				$"eye={findEyeColour}, hint={(DeltaHint() == 0 ? "none" : "ped+0x" + DeltaHint().ToString("X"))}).");
+				$"eye={findEyeColour}, hint={(DeltaHint() == 0 ? "none" : "ped+0x" + DeltaHint().ToString("X"))}, " +
+				$"{findRegionCount} regions in {findEnumMs}ms).");
 			return true;
 		}
 
@@ -376,7 +396,7 @@ namespace FreemodeIdentity {
 					long delta = cand.ToInt64() - sweepPed.MemoryAddress.ToInt64();
 					Logger.Log($"PedHeadBlendMemory: sweep PASS mix={cand.ToInt64():X} " +
 						$"(base {cand.ToInt64() - MixOffsetInStruct:X}, ped{(delta < 0 ? "-" : "+")}0x{Math.Abs(delta):X} = {delta / 0x100000}MB, " +
-						$"hairTint={MemScan.Snapshot(cand, StructSpan)[OffHairColour]}).");
+						$"hairTint={scanHitStruct[OffHairColour]}).");
 					ProbePointerPath(sweepPed, cand);
 					if (++sweepHits >= SweepMaxPasses) {
 						Logger.Log($"PedHeadBlendMemory: sweep stopped at {SweepMaxPasses} passes after {sweepBytes / 0x100000}MB.");
@@ -402,7 +422,8 @@ namespace FreemodeIdentity {
 		// 0,0,0, which matches countless unrelated zero runs in memory. So require BOTH the triple
 		// AND the morph-range fingerprint (LooksLikeStruct) here, same as at find time.
 		static bool MixMatches(IntPtr mix) {
-			return LooksLikeStruct(mix);
+			byte[] s = MemScan.Snapshot(mix, StructSpan);
+			return s.Length >= StructSpan && LooksLikeStruct(s, 0);
 		}
 
 		// Is `mix` the real CPedHeadBlendData anchor, or just a coincidental run of floats that
@@ -417,19 +438,23 @@ namespace FreemodeIdentity {
 		// returned for THIS ped (findOverlayValues). That is a precise fingerprint a random region
 		// won't reproduce. We additionally reject morph arrays that are denormal/garbage so a near-
 		// zero region can't sneak through. The mix triple still gates first (cheap reject).
-		static bool LooksLikeStruct(IntPtr mix) {
-			byte[] s = MemScan.Snapshot(mix, StructSpan);
-			if (s.Length < StructSpan) {
+		// `s` holds the struct starting at `at`. Taking a buffer rather than an address lets the
+		// scan verify a candidate inside the megabyte it has ALREADY copied: no second read, no
+		// per-candidate allocation, and no VirtualQuery. On a ped whose heritage anchor recurs in
+		// memory that is thousands of avoided round-trips per scan, and it fingerprints exactly
+		// the bytes the triple matched on rather than whatever the address holds a moment later.
+		static bool LooksLikeStruct(byte[] s, int at) {
+			if (s.Length < at + StructSpan) {
 				return false;
 			}
-			if (!FloatEq(BitConverter.ToSingle(s, OffShapeMix), findShape) ||
-				!FloatEq(BitConverter.ToSingle(s, OffShapeMix + 4), findSkin) ||
-				!FloatEq(BitConverter.ToSingle(s, OffShapeMix + 8), findThird)) {
+			if (!FloatEq(BitConverter.ToSingle(s, at + OffShapeMix), findShape) ||
+				!FloatEq(BitConverter.ToSingle(s, at + OffShapeMix + 4), findSkin) ||
+				!FloatEq(BitConverter.ToSingle(s, at + OffShapeMix + 8), findThird)) {
 				return false;
 			}
 			// Strong, ped-specific signature: the live overlay drawable indices must match exactly.
 			for (int i = 0; i < PedAppearance.OverlayCount; i++) {
-				if (s[OffOverlayValue + i] != findOverlayValues[i]) {
+				if (s[at + OffOverlayValue + i] != findOverlayValues[i]) {
 					return false;
 				}
 			}
@@ -445,14 +470,14 @@ namespace FreemodeIdentity {
 			// nothing else to identify it by. Discriminating that ped is HasDistinguishingContent's
 			// job, not this check's.
 			if (findEyeColour >= 0 && findEyeColour <= MaxEyeColourIndex &&
-				BitConverter.ToUInt16(s, OffEyeColour) != findEyeColour) {
+				BitConverter.ToUInt16(s, at + OffEyeColour) != findEyeColour) {
 				return false;
 			}
 			// And the morph array must be PLAUSIBLE morph data, not denormal noise that merely falls
 			// in range. A real morph is 0 or a normal float in [-1.5,1.5]; reject NaN, out-of-range,
 			// and sub-normal tiny magnitudes (|v| < 1e-6 but nonzero) that signal reinterpreted bytes.
 			for (int i = 0; i < PedAppearance.FaceFeatureCount; i++) {
-				float v = BitConverter.ToSingle(s, OffFaceFeature + i * 4);
+				float v = BitConverter.ToSingle(s, at + OffFaceFeature + i * 4);
 				if (float.IsNaN(v) || v < -1.5f || v > 1.5f) {
 					return false;
 				}
@@ -494,9 +519,13 @@ namespace FreemodeIdentity {
 				var sw = System.Diagnostics.Stopwatch.StartNew();
 				while (sw.ElapsedMilliseconds < FindBudgetMs && findRegions.MoveNext()) {
 					MemScan.Region r = findRegions.Current;
+					long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
 					int len = MemScan.SnapshotInto(r.Base, scanBytes, (int)Math.Min(r.Size, RegionChunk));
+					long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
 					findBytes += len;
 					IntPtr cand = ScanBuffer(r.Base, scanBytes, len);
+					findReadTicks += t1 - t0;
+					findScanTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t1;
 					if (cand == IntPtr.Zero) {
 						continue;
 					}
@@ -504,14 +533,15 @@ namespace FreemodeIdentity {
 					mixResult = cand;
 					cachedPed = findPed;   // cache for cheap reuse on later snapshots
 					cachedMix = cand;
-					// Snapshot the struct NOW. The deferred decoration capture that runs after this
-					// find churns the ped and can relocate the struct, so reading it later (in
-					// TryFill) would hit a stale address. Capture the final bytes here instead.
-					foundStruct = MemScan.Snapshot(cand, StructSpan);
+					// The struct bytes come from the scan buffer, captured when the fingerprint
+					// passed. Re-reading the address later (in TryFill) would hit a stale one: the
+					// deferred decoration capture that runs after this find churns the ped and can
+					// relocate the struct.
+					foundStruct = scanHitStruct;
 					findRunning = false;
 					findRegions = null;
 					Logger.LogDebug($"PedHeadBlendMemory: mix FOUND after {findBytes / 0x100000}MB in {Game.GameTime - findStartMs}ms " +
-						$"(mix={cand.ToInt64():X}, ped+0x{cand.ToInt64() - findPed:X}, eye={findEyeColour}, " +
+						$"({Cost()}, mix={cand.ToInt64():X}, ped+0x{cand.ToInt64() - findPed:X}, eye={findEyeColour}, " +
 						$"hairTint={foundStruct[OffHairColour]}/{foundStruct[OffHairHighlight]}).");
 					return;
 				}
@@ -520,7 +550,7 @@ namespace FreemodeIdentity {
 					findRunning = false;
 					findRegions = null;
 					Logger.Log($"PedHeadBlendMemory: mix NOT found in {findBytes / 0x100000}MB around the ped " +
-						$"(heritage triple hit {findTripleHits}x, {findRejects} rejected by fingerprint). " +
+						$"(heritage triple hit {findTripleHits}x, {findRejects} rejected by fingerprint; {Cost()}). " +
 						"Run Debug > Find Head-Blend Path to search all of memory.");
 				}
 			} catch (Exception e) {
@@ -693,6 +723,10 @@ namespace FreemodeIdentity {
 		static readonly byte[] scanBytes = new byte[RegionChunk];
 		static readonly int[] scanInts = new int[RegionChunk / 4];
 
+		// The struct bytes behind the candidate ScanBuffer last returned, taken at the moment the
+		// fingerprint passed. Callers consume this instead of re-reading the address.
+		static byte[] scanHitStruct;
+
 		// Which of the three mix floats to match on. Matching on a zero component would hit every
 		// zero run in memory and turn the scan into a fingerprint-check grind, so anchor on a
 		// non-zero one and verify the other two around it.
@@ -723,10 +757,18 @@ namespace FreemodeIdentity {
 				}
 				findTripleHits++;
 				IntPtr cand = origin + off;
-				if (LooksLikeStruct(cand)) {
-					return cand;
+				// Verify against the buffer we already hold; only fall back to a live read when the
+				// struct runs off the end of this chunk (a 1MB chunk boundary can split it).
+				bool inBuf = off + StructSpan <= length;
+				byte[] s = inBuf ? buf : MemScan.Snapshot(cand, StructSpan);
+				int at = inBuf ? off : 0;
+				if (!LooksLikeStruct(s, at)) {
+					findRejects++;
+					continue;
 				}
-				findRejects++;
+				scanHitStruct = new byte[StructSpan];
+				Buffer.BlockCopy(s, at, scanHitStruct, 0, StructSpan);
+				return cand;
 			}
 			return IntPtr.Zero;
 		}
@@ -776,7 +818,12 @@ namespace FreemodeIdentity {
 			long origin = pedAddr.ToInt64() + DeltaHint();
 			long ped = pedAddr.ToInt64();
 			var regions = new List<MemScan.Region>();
-			foreach (MemScan.Region r in MemScan.EnumerateRegions(RegionChunk, writableOnly: true, privateOnly: true)) {
+			// Bound the walk itself, not just what we keep: outside the radius there is nothing to
+			// collect, and crawling the rest of the address space costs a VirtualQuery per region
+			// before the first byte is ever read.
+			long from = radius > 0 ? Math.Max(0, ped - radius) : 0;
+			long to = radius > 0 ? ped + radius : 0;
+			foreach (MemScan.Region r in MemScan.EnumerateRegions(RegionChunk, writableOnly: true, privateOnly: true, startAddr: from, endAddr: to)) {
 				if (radius <= 0 || Math.Abs(r.Base.ToInt64() - ped) <= radius) {
 					regions.Add(r);
 				}
