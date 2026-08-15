@@ -569,9 +569,9 @@ namespace FreemodeIdentity {
 			// micro-morphs and overlay opacity, plus a cross-check of overlay drawable and
 			// eye colour. Runs AFTER the native captures so it enriches them. If the struct
 			// can't be located this is a no-op and the native-captured/default values
-			// stand. Overlay TINT colours are not yet located on Enhanced, so they stay
-			// default and OverlayTintFromMemory stays false (apply then skips tinting to
-			// avoid the green/red-face bug).
+			// stand — which is the SAFE failure: opacity stays 1.0 and the tint stays
+			// unset, where a mislocated struct would zero the opacity (invisible
+			// eyebrows), zero the eye colour and tint every slot from palette 0.
 			ad.HeadDataFromMemory = PedHeadBlendMemory.TryFill(ped, ad);
 			// Flag a face that didn't round-trip (garbage heritage + zero morphs) so apply leaves
 			// the ped's face untouched instead of writing the broken blend.

@@ -74,8 +74,21 @@ namespace FreemodeIdentity {
 		const long RegionChunk = 0x100000;
 
 		// The mix anchor sits 0x28 into CPedHeadBlendData (six u32 blend ids at 0x10-0x27, then the
-		// shape/skin/third mix floats). Only used to report the struct base in diagnostics.
+		// shape/skin/third mix floats). Used to report the struct base, and to check its alignment.
 		const int MixOffsetInStruct = 0x28;
+
+		// The struct comes out of a pool that aligns it to 16 bytes: every anchor ever located here —
+		// four by full-memory sweep, four more by a successful find — had a 16-aligned base. A run of
+		// memory that merely looks like the struct has no reason to, so the base's alignment is a free
+		// filter, and it is exactly what separated the real struct from the zero region that saved
+		// black hair over a real colour (base ...004, 4-aligned).
+		const int StructAlign = 0x10;
+
+		// DEAD END — don't re-attempt: the six shape/skin parent ids the native reports are NOT at
+		// mix-0x18 (struct+0x10), whatever the documented layout says. Dumped mix-0x40..mix on three
+		// characters and the ids appear nowhere in it: native [37,25,0,12,14,1] against sixteen
+		// int32s of unrelated data. As a fingerprint gate they never matched, which cost every save
+		// its early exit — the full 834MB radius instead of the first few MB.
 
 
 		static bool Initialized;
@@ -127,6 +140,23 @@ namespace FreemodeIdentity {
 		// buffer scan means the next slow report names the culprit instead of inviting another guess.
 		static long findReadTicks, findScanTicks, findEnumMs;
 		static int findRegionCount;
+		static int findMisaligned;
+
+		// Take a located struct: cache it, persist the hint, and keep the bytes the fingerprint
+		// passed on. Re-reading the address later (in TryFill) would hit a stale one — the deferred
+		// decoration capture that runs after this find churns the ped and can relocate the struct.
+		static void Accept(IntPtr cand, byte[] structBytes) {
+			SaveDeltaHint(cand.ToInt64() - findPed);
+			mixResult = cand;
+			cachedPed = findPed;   // cache for cheap reuse on later snapshots
+			cachedMix = cand;
+			foundStruct = structBytes;
+			findRunning = false;
+			findRegions = null;
+			Logger.LogDebug($"PedHeadBlendMemory: mix FOUND after {findBytes / 0x100000}MB in {Game.GameTime - findStartMs}ms " +
+				$"({Cost()}, {findMisaligned} misaligned, mix={cand.ToInt64():X}, ped+0x{cand.ToInt64() - findPed:X}, " +
+				$"eye={findEyeColour}, hairTint={structBytes[OffHairColour]}/{structBytes[OffHairHighlight]}).");
+		}
 
 		static string Cost() {
 			long perMs = System.Diagnostics.Stopwatch.Frequency / 1000;
@@ -149,6 +179,17 @@ namespace FreemodeIdentity {
 		static int findEyeColour = -1;
 		static long findPed;
 		static IntPtr mixResult;
+
+		// A fingerprint is WEAK when every byte it compares is ALSO the default value: zero heritage,
+		// no overlays, and eye colour 0. Nothing in it is specific to this ped, so any suitably shaped
+		// run of zeros passes and the first pass wins by position alone — measured, a zero region 1MB
+		// into the scan beat the real struct and wrote a black hair tint over a real colour. For these
+		// peds we scan the whole radius and accept only a UNIQUE pass; ambiguity keeps the defaults.
+		static bool weakScan;
+		static readonly List<IntPtr> weakHits = new List<IntPtr>();
+		static readonly List<byte[]> weakHitStructs = new List<byte[]>();
+		// Past two look-alikes the answer is already ambiguous; more can't make it decisive, so stop.
+		const int WeakHitCap = 8;
 
 		// Session cache: the CPedHeadBlendData doesn't move while the ped/model is unchanged, so a
 		// found mix-start is reused on later snapshots after a cheap re-validation (read the three
@@ -275,21 +316,16 @@ namespace FreemodeIdentity {
 				Logger.LogDebug($"PedHeadBlendMemory: mix cache HIT (mix={cachedMix.ToInt64():X}).");
 				return true;
 			}
-			// The scan identifies the struct purely by content, so it can only run on a ped that HAS
-			// content. On one with default heritage, no overlays and no eye colour every byte the
-			// fingerprint compares is a default, so a match proves nothing — the scan wouldn't find
-			// the struct, it would find A match and save whatever that region held (measured: a black
-			// hair tint and EyeColor=65535 written into a slot). Keeping defaults and saying so is
-			// the honest outcome.
-			if (!HasDistinguishingContent()) {
-				Logger.Log("PedHeadBlendMemory: this ped has nothing to identify its head blend by (default heritage, " +
-					"no overlays, no eye colour); keeping defaults rather than guessing.");
-				findRunning = false;
-				return true;
-			}
+			// A ped with nothing specific about it can't be found by content — but it CAN still be
+			// found by elimination, if only one region in range looks like its struct at all. So
+			// rather than give up, scan the whole radius and demand a unique pass (see weakScan).
+			weakScan = WeakFingerprint();
+			weakHits.Clear();
+			weakHitStructs.Clear();
 			findBytes = 0;
 			findTripleHits = 0;
 			findRejects = 0;
+			findMisaligned = 0;
 			findReadTicks = 0;
 			findScanTicks = 0;
 			var enumSw = System.Diagnostics.Stopwatch.StartNew();
@@ -300,27 +336,27 @@ namespace FreemodeIdentity {
 			findStartMs = Game.GameTime;
 			Logger.LogDebug($"PedHeadBlendMemory: scanning near the ped (heritage={findShape:G9},{findSkin:G9},{findThird:G9}, " +
 				$"eye={findEyeColour}, hint={(DeltaHint() == 0 ? "none" : "ped+0x" + DeltaHint().ToString("X"))}, " +
-				$"{findRegionCount} regions in {findEnumMs}ms).");
+				$"{findRegionCount} regions in {findEnumMs}ms{(weakScan ? ", WEAK fingerprint - scanning all of it for a unique match" : "")}).");
 			return true;
 		}
 
-		// Does this ped carry anything a CONTENT search could identify its head blend by? Heritage
-		// that isn't the default triple, any overlay actually set, or a readable eye colour. With
-		// none of the three, every byte the fingerprint compares is a default value and a match
-		// proves nothing.
-		static bool HasDistinguishingContent() {
+		// Does this ped carry NOTHING a content search can identify its head blend by? Heritage that
+		// is the default triple, no overlay set, and eye colour 0 — note eye colour ZERO, not the
+		// getter's -1: 0 is the default palette index, so it discriminates nothing and treating it as
+		// content is what let a zero region pass for Test's struct.
+		static bool WeakFingerprint() {
 			if (findShape != 0f || findSkin != 0f || findThird != 0f) {
-				return true;
+				return false;
 			}
-			if (findEyeColour >= 0 && findEyeColour <= MaxEyeColourIndex) {
-				return true;
+			if (findEyeColour > 0 && findEyeColour <= MaxEyeColourIndex) {
+				return false;
 			}
 			for (int i = 0; i < PedAppearance.OverlayCount; i++) {
 				if (findOverlayValues[i] != 255) {
-					return true;
+					return false;
 				}
 			}
-			return false;
+			return true;
 		}
 
 		// ---- Full-memory sweep (diagnostic, user-invoked) --------------------------------
@@ -361,11 +397,12 @@ namespace FreemodeIdentity {
 				Logger.Log($"PedHeadBlendMemory: sweep aborted — head blend not readable ({lastRejectedMix}).");
 				return;
 			}
-			if (!HasDistinguishingContent()) {
-				Logger.Log("PedHeadBlendMemory: sweep aborted — this ped has default heritage, no overlays and no eye " +
-					"colour, so the triple matches everywhere. Run it on a distinctive character.");
+			if (WeakFingerprint()) {
+				Logger.Log("PedHeadBlendMemory: sweep aborted — this ped has default heritage, no overlays and eye " +
+					"colour 0, so the triple matches everywhere. Run it on a distinctive character.");
 				return;
 			}
+			weakScan = false; // the sweep reports every pass itself; it never wants the collect path
 			// Unbounded (radius 0) but still nearest-first, so a sweep that does find something finds
 			// it early and its ped-delta is comparable with the finder's radius.
 			findTripleHits = 0;
@@ -422,8 +459,7 @@ namespace FreemodeIdentity {
 		// 0,0,0, which matches countless unrelated zero runs in memory. So require BOTH the triple
 		// AND the morph-range fingerprint (LooksLikeStruct) here, same as at find time.
 		static bool MixMatches(IntPtr mix) {
-			byte[] s = MemScan.Snapshot(mix, StructSpan);
-			return s.Length >= StructSpan && LooksLikeStruct(s, 0);
+			return LooksLikeStruct(MemScan.Snapshot(mix, StructSpan), 0);
 		}
 
 		// Is `mix` the real CPedHeadBlendData anchor, or just a coincidental run of floats that
@@ -517,7 +553,17 @@ namespace FreemodeIdentity {
 			}
 			try {
 				var sw = System.Diagnostics.Stopwatch.StartNew();
-				while (sw.ElapsedMilliseconds < FindBudgetMs && findRegions.MoveNext()) {
+				bool exhausted = false;
+				while (sw.ElapsedMilliseconds < FindBudgetMs) {
+					// Already ambiguous — more look-alikes can't make it decisive, so stop paying for them.
+					if (weakScan && weakHits.Count >= WeakHitCap) {
+						exhausted = true;
+						break;
+					}
+					if (!findRegions.MoveNext()) {
+						exhausted = true;
+						break;
+					}
 					MemScan.Region r = findRegions.Current;
 					long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
 					int len = MemScan.SnapshotInto(r.Base, scanBytes, (int)Math.Min(r.Size, RegionChunk));
@@ -526,33 +572,33 @@ namespace FreemodeIdentity {
 					IntPtr cand = ScanBuffer(r.Base, scanBytes, len);
 					findReadTicks += t1 - t0;
 					findScanTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t1;
-					if (cand == IntPtr.Zero) {
-						continue;
+					// A weak scan never returns a candidate here — it collects them and is judged below.
+					if (cand != IntPtr.Zero) {
+						Accept(cand, scanHitStruct);
+						return;
 					}
-					SaveDeltaHint(cand.ToInt64() - findPed);
-					mixResult = cand;
-					cachedPed = findPed;   // cache for cheap reuse on later snapshots
-					cachedMix = cand;
-					// The struct bytes come from the scan buffer, captured when the fingerprint
-					// passed. Re-reading the address later (in TryFill) would hit a stale one: the
-					// deferred decoration capture that runs after this find churns the ped and can
-					// relocate the struct.
-					foundStruct = scanHitStruct;
-					findRunning = false;
-					findRegions = null;
-					Logger.LogDebug($"PedHeadBlendMemory: mix FOUND after {findBytes / 0x100000}MB in {Game.GameTime - findStartMs}ms " +
-						$"({Cost()}, mix={cand.ToInt64():X}, ped+0x{cand.ToInt64() - findPed:X}, eye={findEyeColour}, " +
-						$"hairTint={foundStruct[OffHairColour]}/{foundStruct[OffHairHighlight]}).");
+				}
+				if (!exhausted) {
+					return; // budget spent for this tick; resume next one
+				}
+				// Every region in range scanned. A weak fingerprint earns the answer only if exactly
+				// one region in the whole radius could have been it.
+				if (weakScan && weakHits.Count == 1) {
+					Accept(weakHits[0], weakHitStructs[0]);
 					return;
 				}
-				// Enumerator ended within budget: every region in range scanned, not found.
-				if (sw.ElapsedMilliseconds < FindBudgetMs) {
-					findRunning = false;
-					findRegions = null;
-					Logger.Log($"PedHeadBlendMemory: mix NOT found in {findBytes / 0x100000}MB around the ped " +
-						$"(heritage triple hit {findTripleHits}x, {findRejects} rejected by fingerprint; {Cost()}). " +
-						"Run Debug > Find Head-Blend Path to search all of memory.");
+				findRunning = false;
+				findRegions = null;
+				if (weakScan && weakHits.Count > 1) {
+					Logger.Log($"PedHeadBlendMemory: {weakHits.Count} regions look equally like this ped's head blend " +
+						"(default heritage, no overlays, eye colour 0 — nothing identifies it), so any pick would be a " +
+						"guess; keeping defaults. Give the character a distinguishing feature (eye colour, an eyebrow, " +
+						"or a parent mix) and save again.");
+					return;
 				}
+				Logger.Log($"PedHeadBlendMemory: mix NOT found in {findBytes / 0x100000}MB around the ped " +
+					$"(heritage triple hit {findTripleHits}x, {findMisaligned} misaligned, {findRejects} rejected by " +
+					$"fingerprint; {Cost()}). Run Debug > Find Head-Blend Path to search all of memory.");
 			} catch (Exception e) {
 				Logger.LogError("PedHeadBlendMemory.TickFind: " + e);
 				findRunning = false;
@@ -757,6 +803,10 @@ namespace FreemodeIdentity {
 				}
 				findTripleHits++;
 				IntPtr cand = origin + off;
+				if (((cand.ToInt64() - MixOffsetInStruct) & (StructAlign - 1)) != 0) {
+					findMisaligned++;
+					continue;
+				}
 				// Verify against the buffer we already hold; only fall back to a live read when the
 				// struct runs off the end of this chunk (a 1MB chunk boundary can split it).
 				bool inBuf = off + StructSpan <= length;
@@ -766,9 +816,18 @@ namespace FreemodeIdentity {
 					findRejects++;
 					continue;
 				}
-				scanHitStruct = new byte[StructSpan];
-				Buffer.BlockCopy(s, at, scanHitStruct, 0, StructSpan);
-				return cand;
+				var hit = new byte[StructSpan];
+				Buffer.BlockCopy(s, at, hit, 0, StructSpan);
+				if (!weakScan) {
+					scanHitStruct = hit;
+					return cand;
+				}
+				// Weak fingerprint: collect instead of returning, so the caller can insist the answer
+				// is the only one in range before trusting it.
+				if (weakHits.Count < WeakHitCap) {
+					weakHits.Add(cand);
+					weakHitStructs.Add(hit);
+				}
 			}
 			return IntPtr.Zero;
 		}
