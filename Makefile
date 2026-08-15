@@ -19,11 +19,9 @@ PLATFORM    ?= x64
 
 DLL         := FreemodeIdentity.dll
 ASI         := FreemodeIdentity.asi
-MOD_NAME    := Freemode Identity
 DIST        := dist
 STAGE       := $(DIST)
 SCRIPTS     := $(DIST)/scripts
-ZIP         := $(DIST)/FreemodeIdentity.zip
 
 # Native spend-shim (.asi) — CMake + MSVC, built under native/build. Its output drops
 # into the game ROOT (next to ScriptHookV.dll), not scripts/.
@@ -43,7 +41,15 @@ NATIVE_ASI  := $(NATIVE_DIR)/build/Release/$(ASI)
 NATIVE_CFG  := -A x64
 endif
 
+# Version names the archive: a download sitting in someone's folder should say which
+# release it is. Defaults to the csproj <Version> — a 4-part number (1.0.0.0) whose
+# trailing .0 is trimmed to the semver form gta5-mods.com expects. The release workflow
+# stamps that from the git tag, so it is only trustworthy on the runner; the repo's copy
+# lags behind the tags. Pass the version for a local package:
+#   make package VERSION=1.0.1
+# ZIP follows VERSION because := expands immediately.
 VERSION     := $(shell sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$(PROJECT)" | head -1 | sed 's:\.0$$::')
+ZIP         := $(DIST)/FreemodeIdentity-$(VERSION).zip
 
 # Assemblies the player already has from their ScriptHookV .NET install — referenced
 # (SpecificVersion=False) but never bundled.
@@ -88,7 +94,9 @@ rebuild: ## clean then build
 
 package: build native ## build BOTH halves, then zip a deploy-ready archive into dist/
 	@test -n "$(VERSION)" || { echo "could not read <Version> from $(PROJECT)"; exit 1; }
-	@rm -rf "$(SCRIPTS)" "$(STAGE)/gta5mod.json" "$(STAGE)/$(ASI)" "$(ZIP)"
+	@# Clear every versioned archive, not just this one, so dist/ holds exactly one
+	@# build and the release workflow's glob can't pick up a stale zip.
+	@rm -rf "$(SCRIPTS)" "$(STAGE)/$(ASI)" "$(DIST)"/FreemodeIdentity-*.zip
 	@mkdir -p "$(SCRIPTS)"
 	@# The C# mod DLL goes in scripts/ (plus any non-player-provided dep it emitted).
 	@for dll in bin/$(CONFIG)/*.dll; do \
@@ -99,8 +107,7 @@ package: build native ## build BOTH halves, then zip a deploy-ready archive into
 	@test -f "$(SCRIPTS)/$(DLL)" || { echo "build output missing $(DLL)"; exit 1; }
 	@# The native spend-shim .asi goes in the game ROOT (archive root, next to scripts/).
 	@cp "$(NATIVE_ASI)" "$(STAGE)/$(ASI)"
-	@printf '{\n  "name": "%s",\n  "version": "%s"\n}\n' "$(MOD_NAME)" "$(VERSION)" > "$(STAGE)/gta5mod.json"
-	@powershell -NoProfile -Command "Compress-Archive -Path '$(DIST)/scripts','$(DIST)/$(ASI)','$(DIST)/gta5mod.json' -DestinationPath '$(ZIP)' -Force"
+	@powershell -NoProfile -Command "Compress-Archive -Path '$(DIST)/scripts','$(DIST)/$(ASI)' -DestinationPath '$(ZIP)' -Force"
 	@echo "packaged $(ZIP) (v$(VERSION)):"
 	@powershell -NoProfile -Command "Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::OpenRead((Resolve-Path '$(ZIP)')).Entries | ForEach-Object { '  ' + \$$_.FullName }"
 

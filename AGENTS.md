@@ -93,7 +93,7 @@ These were settled in-game; don't re-derive or second-guess them without a probe
 - The user DEPLOYS and runs in-game tests (game CLOSED to overwrite the locked `.asi`);
   don't copy into the game folder or push a remote unless asked.
 - Packaging ships both artifacts (`.dll`+`.ini` in `scripts/`, `.asi` in the game root)
-  plus the Vortex `gta5mod.json`. No README in the package.
+  into a version-named zip (`FreemodeIdentity-<version>.zip`). No README in the package.
 
 ## Don't do
 - Don't put in the native shim anything C# can do — it stays a minimal spend-redirect.

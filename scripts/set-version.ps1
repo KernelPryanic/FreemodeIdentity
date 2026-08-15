@@ -5,12 +5,12 @@
 .DESCRIPTION
   The git tag is the source of truth for a release. Two places carry the version:
     - FreemodeIdentity.csproj <Version> — read by `make package` (trimmed to semver
-      for gta5mod.json and the zip name).
+      for the zip name).
     - Properties\AssemblyInfo.cs [assembly: AssemblyVersion]/[AssemblyFileVersion] —
       the actual DLL version (this legacy project ignores the csproj <AssemblyVersion>),
       which the mod reads at runtime to show the menu/log version.
-  We stamp the tag into both before packaging, so the artifact, gta5mod.json and the
-  in-game version all match the tag. This touches only the runner's checkout, never a
+  We stamp the tag into both before packaging, so the artifact name and the in-game
+  version both match the tag. This touches only the runner's checkout, never a
   commit, so no pre-release bump is needed.
 
   Accepts a semver tag ("0.1.0" or "v0.1.0"); .NET version attributes want four
@@ -29,7 +29,7 @@ $fourPart = if ($semver -match '^\d+\.\d+\.\d+$') { "$semver.0" } else { $semver
 
 $root = Split-Path -Parent $PSScriptRoot
 
-# csproj <Version> — make package reads this for gta5mod.json.
+# csproj <Version> — make package reads this for the zip name.
 $csproj = Join-Path $root 'FreemodeIdentity.csproj'
 $xml = Get-Content $csproj -Raw
 $xml = $xml -replace '<Version>.*?</Version>', "<Version>$fourPart</Version>"

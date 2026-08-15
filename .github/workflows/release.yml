@@ -24,8 +24,8 @@ jobs:
           arch: x64
 
       # The tag is the source of truth for the version. Stamp it into the csproj +
-      # AssemblyInfo before packaging so the artifact (and the gta5mod.json / zip name
-      # / in-game version that derive from it) all match the tag — no pre-release bump
+      # AssemblyInfo before packaging so the artifact (whose zip name and in-game
+      # version both derive from it) always matches the tag — no pre-release bump
       # commit. Touches only the runner's checkout.
       - name: Set version from tag
         shell: pwsh
@@ -54,5 +54,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/FreemodeIdentity.zip
+          # Globbed rather than spelled out, so the Makefile stays the only place
+          # that decides the archive name. `make package` clears older zips first,
+          # so exactly one file matches.
+          files: dist/FreemodeIdentity-*.zip
           generate_release_notes: true

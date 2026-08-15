@@ -10,7 +10,7 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>FreemodeIdentity</RootNamespace>
     <AssemblyName>FreemodeIdentity</AssemblyName>
-    <!-- make package reads <Version> for gta5mod.json. The DLL's AssemblyVersion/
+    <!-- make package reads <Version> for the zip name. The DLL's AssemblyVersion/
          FileVersion come from Properties\AssemblyInfo.cs (this legacy project
          ignores the csproj equivalents); keep both in sync via set-version.ps1. -->
     <Version>0.1.0.0</Version>
