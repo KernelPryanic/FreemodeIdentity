@@ -402,6 +402,9 @@ namespace FreemodeIdentity {
 
 		// ---- Voice & movement --------------------------------------------------
 
+		// Clipsets already waited on once this session. See the wait in ApplyVoiceAndMovement.
+		static readonly HashSet<string> waitedClipSets = new HashSet<string>();
+
 		public static void ApplyVoiceAndMovement(Ped ped, AppearanceData ad) {
 			if (ad.VoiceHash != 0) {
 				Function.Call(Hash.SET_AMBIENT_VOICE_NAME_HASH, ped, ad.VoiceHash);
@@ -411,8 +414,15 @@ namespace FreemodeIdentity {
 				// _CLIPSET takes effect; request it and wait (bounded) for the load,
 				// or the set silently no-ops. 1.0 = full blend-in duration.
 				Function.Call(Hash.REQUEST_CLIP_SET, ad.MovingStyle);
-				for (int i = 0; i < 100 && !Function.Call<bool>(Hash.HAS_CLIP_SET_LOADED, ad.MovingStyle); i++) {
-					Script.Wait(10);
+				// Only wait the first time a given clipset is seen. A name the game doesn't have
+				// never loads, so the wait burns its whole budget on EVERY apply — and the auto-apply
+				// defender re-applies every few seconds, turning one bad style into a permanent
+				// stutter. A later apply still sets it if the request has landed by then.
+				if (!waitedClipSets.Contains(ad.MovingStyle)) {
+					waitedClipSets.Add(ad.MovingStyle);
+					for (int i = 0; i < 100 && !Function.Call<bool>(Hash.HAS_CLIP_SET_LOADED, ad.MovingStyle); i++) {
+						Script.Wait(10);
+					}
 				}
 				Function.Call(Hash.SET_PED_MOVEMENT_CLIPSET, ped, ad.MovingStyle, 1.0f);
 			} else {

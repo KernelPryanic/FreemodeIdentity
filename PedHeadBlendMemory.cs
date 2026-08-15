@@ -126,6 +126,11 @@ namespace FreemodeIdentity {
 		// its memory is how this subsystem has faulted the game before. So the find runs tick-driven
 		// and time-sliced, off the snapshot hot path, the same way mood and the tattoo base are
 		// found. BeginFind starts it; TryFill consumes the result once FindRunning is false.
+		// DELIBERATELY coarse. The tick that drives this hands the finder the whole tick and returns,
+		// and an SHVDN tick stalls the frame, so this budget IS the frame time while a scan runs:
+		// ~3 FPS at 300ms. Slicing it to one frame instead was tried and rejected — it only trades
+		// the same total work for twice the wall-clock, and a short stutter that ends is better than
+		// a long save that doesn't. Bounded well under SHVDN's 5s watchdog.
 		const long FindBudgetMs = 300;
 
 		static bool findRunning;
