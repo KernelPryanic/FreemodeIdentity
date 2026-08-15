@@ -12,7 +12,10 @@
   would prove or disprove the change, and say what you verified and what you couldn't.
 - Commit messages: as short as the change allows — one subject line, a body only for a
   why the diff doesn't show. No `Co-Authored-By` or any other trailer.
-- Run shell commands through Bash (POSIX sh), not PowerShell.
+- Run everything through Bash (POSIX sh): tool calls, Makefile recipes, helper scripts.
+  PowerShell only where nothing else does the job — `Compress-Archive` in `make package`,
+  `scripts/*.ps1` for the version stamp and the dependency fetch — never for an ad-hoc
+  command.
 
 ## Why hybrid (read this first)
 The single hard engine fact that shapes everything: **SP shop spending is resolved
