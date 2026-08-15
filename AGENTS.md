@@ -1,11 +1,18 @@
 # AGENTS.md — FreemodeWallet (hybrid C# mod + native spend shim)
 
-Gives a **freemode (MP-model) single-player character a real spendable wallet** —
-earns from cash pickups, spends in shops — like a story protagonist. It is an
-**add-on to AppearanceKeeper**: the wallet is only useful while a freemode ped is
-spoofed to a protagonist model (AppearanceKeeper's job), since shops gate entry and
-money resolution on the model. Ships and versions separately, but depends on
-AppearanceKeeper at runtime.
+## Working style
+- Verify a diagnosis against the current code before fixing it. One commit per fix.
+- Scale verification to the risk of being wrong. A menu label or a tuned constant needs
+  a clean build and one look; the tick loop, the shared state block, the detour, or an
+  unproven diagnosis needs an in-game run and the log behind it.
+- The game is the only integration test and the user drives it. A clean compile proves
+  the natives resolve and nothing else — never claim a behavioural result you haven't
+  been shown.
+- Before calling work done: build clean, then hand over the exact in-game steps that
+  would prove or disprove the change, and say what you verified and what you couldn't.
+- Commit messages: as short as the change allows — one subject line, a body only for a
+  why the diff doesn't show. No `Co-Authored-By` or any other trailer.
+- Run shell commands through Bash (POSIX sh), not PowerShell.
 
 ## Why hybrid (read this first)
 The single hard engine fact that shapes everything: **SP shop spending is resolved
