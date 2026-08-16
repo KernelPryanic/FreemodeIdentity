@@ -364,101 +364,6 @@ namespace FreemodeIdentity {
 			return true;
 		}
 
-		// ---- Full-memory sweep (diagnostic, user-invoked) --------------------------------
-		// The probe can only report who points at a struct we already found, so on a ped the finder
-		// misses it tells us nothing — exactly the ped we need the path for. This sweeps every
-		// committed private read-write region for the heritage triple instead, which does not depend
-		// on the struct being reachable from the ped at all, then probes each hit. Slow and
-		// deliberately manual: it exists to derive the offsets, not to run during a save.
-		//
-		// Only meaningful on a DISTINCTIVE character. With default heritage the triple is 0,0,0 and
-		// the sweep would report thousands of zero runs.
-		const long SweepBudgetMs = 200;
-		// Counts only hits that PASS the fingerprint. The bare triple matches in creator buffers,
-		// script globals and save data — capping on raw hits stopped two sweeps inside the first
-		// 40MB and reported "done" without ever reaching the struct.
-		const int SweepMaxPasses = 4;
-
-		static bool sweepRunning;
-		static IEnumerator<MemScan.Region> sweepRegions;
-		static long sweepBytes;
-		static int sweepHits;
-		static Ped sweepPed;
-
-		public static bool SweepRunning => sweepRunning;
-
-		public static void BeginSweep(Ped ped) {
-			sweepRunning = false;
-			sweepRegions = null;
-			sweepBytes = 0;
-			sweepHits = 0;
-			sweepPed = ped;
-			if (ped == null || !ped.Exists() || ped.MemoryAddress == IntPtr.Zero) {
-				Logger.Log("PedHeadBlendMemory: sweep needs a live ped.");
-				return;
-			}
-			findTargetPed = ped;
-			if (!PrepareFingerprint(ped)) {
-				Logger.Log($"PedHeadBlendMemory: sweep aborted — head blend not readable ({lastRejectedMix}).");
-				return;
-			}
-			if (WeakFingerprint()) {
-				Logger.Log("PedHeadBlendMemory: sweep aborted — this ped has default heritage, no overlays and eye " +
-					"colour 0, so the triple matches everywhere. Run it on a distinctive character.");
-				return;
-			}
-			weakScan = false; // the sweep reports every pass itself; it never wants the collect path
-			// Unbounded (radius 0) but still nearest-first, so a sweep that does find something finds
-			// it early and its ped-delta is comparable with the finder's radius.
-			findTripleHits = 0;
-			findRejects = 0;
-			sweepRegions = RegionsNear(ped.MemoryAddress, 0).GetEnumerator();
-			sweepRunning = true;
-			Logger.Log($"PedHeadBlendMemory: sweep started (heritage={findShape:G9},{findSkin:G9},{findThird:G9}, " +
-				$"eye={findEyeColour}, ped={ped.MemoryAddress.ToInt64():X}).");
-		}
-
-		public static void TickSweep() {
-			if (!sweepRunning) {
-				return;
-			}
-			try {
-				var sw = System.Diagnostics.Stopwatch.StartNew();
-				while (sw.ElapsedMilliseconds < SweepBudgetMs && sweepRegions.MoveNext()) {
-					MemScan.Region r = sweepRegions.Current;
-					int len = MemScan.SnapshotInto(r.Base, scanBytes, (int)Math.Min(r.Size, RegionChunk));
-					sweepBytes += len;
-					IntPtr cand = ScanBuffer(r.Base, scanBytes, len);
-					if (cand == IntPtr.Zero) {
-						continue;
-					}
-					SaveDeltaHint(cand.ToInt64() - sweepPed.MemoryAddress.ToInt64());
-					// Where the struct sits relative to the ped — the number the per-save finder's
-					// search radius is sized from.
-					long delta = cand.ToInt64() - sweepPed.MemoryAddress.ToInt64();
-					Logger.Log($"PedHeadBlendMemory: sweep PASS mix={cand.ToInt64():X} " +
-						$"(base {cand.ToInt64() - MixOffsetInStruct:X}, ped{(delta < 0 ? "-" : "+")}0x{Math.Abs(delta):X} = {delta / 0x100000}MB, " +
-						$"hairTint={scanHitStruct[OffHairColour]}).");
-					ProbePointerPath(sweepPed, cand);
-					if (++sweepHits >= SweepMaxPasses) {
-						Logger.Log($"PedHeadBlendMemory: sweep stopped at {SweepMaxPasses} passes after {sweepBytes / 0x100000}MB.");
-						sweepRunning = false;
-						sweepRegions = null;
-						return;
-					}
-				}
-				if (sw.ElapsedMilliseconds < SweepBudgetMs) {
-					Logger.Log($"PedHeadBlendMemory: sweep finished — {sweepHits} pass(es) across {sweepBytes / 0x100000}MB.");
-					sweepRunning = false;
-					sweepRegions = null;
-				}
-			} catch (Exception e) {
-				Logger.LogError("PedHeadBlendMemory.TickSweep: " + e);
-				sweepRunning = false;
-				sweepRegions = null;
-			}
-		}
-
 		// Cheap revalidation: does the cached mix address still look like a real CPedHeadBlendData?
 		// The heritage triple alone is NOT enough — when a ped has default heritage the triple is
 		// 0,0,0, which matches countless unrelated zero runs in memory. So require BOTH the triple
@@ -603,7 +508,7 @@ namespace FreemodeIdentity {
 				}
 				Logger.Log($"PedHeadBlendMemory: mix NOT found in {findBytes / 0x100000}MB around the ped " +
 					$"(heritage triple hit {findTripleHits}x, {findMisaligned} misaligned, {findRejects} rejected by " +
-					$"fingerprint; {Cost()}). Run Debug > Find Head-Blend Path to search all of memory.");
+					$"fingerprint; {Cost()}).");
 			} catch (Exception e) {
 				Logger.LogError("PedHeadBlendMemory.TickFind: " + e);
 				findRunning = false;
@@ -687,84 +592,6 @@ namespace FreemodeIdentity {
 			// skipping them. See AppearanceData.OverlayTintFromMemory.
 			ad.OverlayTintFromMemory = true;
 			return true;
-		}
-
-		// ---- Pointer-path probe (diagnostic) ---------------------------------------------
-		// The content search exists because CPedHeadBlendData is a RAGE extension: separately
-		// allocated, its pointer parked in the list at ped+0x10, so there is no fixed ped offset
-		// to read. That is only true as far as we've looked, though — if the pointer turns out to
-		// sit somewhere STABLE relative to the ped, reading it directly replaces the whole search
-		// and with it the false-positive lottery on a default-heritage ped.
-		//
-		// So: having located the struct the slow way on a ped whose fingerprint we trust, look for
-		// who POINTS at it, directly in the ped and one hop out, and log the offsets. An offset
-		// that repeats across different characters is the static path we're after. Read-only,
-		// Debug-only, once per successful find — it costs nothing in normal play.
-		// Reach: a probe that reports "0 references" is only meaningful if it looked far enough, and
-		// the first pass didn't — it found the reference on one ped instance and none on another.
-		const int ProbePedBytes = 0x8000;   // how far into CPed to look for the pointer
-		const int ProbeChildBytes = 0x800;  // how far into each child block to look
-		const int ProbeMaxChildren = 1024;  // bound the one-hop sweep
-		const int ProbeMaxHits = 24;        // don't flood the log if the struct is widely referenced
-		// A pointer to the struct won't point at the mix float itself but at the struct BASE, some
-		// way above it. Accept anything landing in a window around the anchor and report the delta.
-		const int ProbeWindowBefore = 0x400;
-
-		static void ProbePointerPath(Ped ped, IntPtr mix) {
-			if (Logger.Threshold > LogLevel.Debug || ped == null || !ped.Exists()) {
-				return;
-			}
-			try {
-				IntPtr pedAddr = ped.MemoryAddress;
-				if (pedAddr == IntPtr.Zero) {
-					return;
-				}
-				long lo = mix.ToInt64() - ProbeWindowBefore;
-				long hi = mix.ToInt64() + StructSpan;
-				long pedBase = pedAddr.ToInt64();
-				int hits = 0;
-
-				byte[] pedBuf = MemScan.Snapshot(pedAddr, ProbePedBytes);
-				var children = new List<KeyValuePair<int, IntPtr>>();
-				for (int off = 0; off + 8 <= pedBuf.Length; off += 8) {
-					long raw = BitConverter.ToInt64(pedBuf, off);
-					if (raw >= lo && raw <= hi) {
-						Logger.LogDebug($"PedHeadBlendMemory: probe — ped+0x{off:X} -> struct ({DeltaToMix(raw, mix)}), ped={pedBase:X}");
-						hits++;
-					} else if ((raw & 7) == 0 && raw > 0x10000 && raw < 0x7FFFFFFFFFFF && children.Count < ProbeMaxChildren) {
-						children.Add(new KeyValuePair<int, IntPtr>(off, (IntPtr)raw));
-					}
-				}
-
-				// One hop out: the extension list is exactly this shape — a pointer in the ped to a
-				// node that holds the pointer we want. Report the full two-step path.
-				foreach (KeyValuePair<int, IntPtr> child in children) {
-					if (hits >= ProbeMaxHits) {
-						break;
-					}
-					byte[] childBuf = MemScan.Snapshot(child.Value, ProbeChildBytes);
-					for (int off = 0; off + 8 <= childBuf.Length; off += 8) {
-						long raw = BitConverter.ToInt64(childBuf, off);
-						if (raw < lo || raw > hi) {
-							continue;
-						}
-						Logger.LogDebug($"PedHeadBlendMemory: probe — ped+0x{child.Key:X} -> +0x{off:X} -> struct ({DeltaToMix(raw, mix)})");
-						if (++hits >= ProbeMaxHits) {
-							break;
-						}
-					}
-				}
-				Logger.LogDebug($"PedHeadBlendMemory: probe — {hits} reference(s) to the struct found (ped={pedBase:X}, mix={mix.ToInt64():X}).");
-			} catch (Exception e) {
-				Logger.LogError("PedHeadBlendMemory.ProbePointerPath: " + e);
-			}
-		}
-
-		// Where a referenced address sits relative to the mix anchor, in HEX — the number is compared
-		// against struct offsets, and a decimal one reads as a different value entirely.
-		static string DeltaToMix(long raw, IntPtr mix) {
-			long delta = raw - mix.ToInt64();
-			return delta < 0 ? $"mix-0x{-delta:X}" : $"mix+0x{delta:X}";
 		}
 
 		// ---- Buffer scanning -------------------------------------------------------------

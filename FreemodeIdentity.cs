@@ -643,9 +643,6 @@ namespace FreemodeIdentity {
 				// all are done.
 				if (MoodMemory.IsRunning) { MoodMemory.Tick(); return; }
 				if (PedHeadBlendMemory.FindRunning) { PedHeadBlendMemory.TickFind(); return; }
-				// Diagnostic sweep (Debug menu). Runs on the same tick budget as the finders so a
-				// multi-gigabyte scan can't trip the watchdog.
-				if (PedHeadBlendMemory.SweepRunning) { PedHeadBlendMemory.TickSweep(); return; }
 				if (SnapshotPending) {
 					Ped pp = Game.Player?.Character;
 					if (pp != null) {
@@ -2593,22 +2590,6 @@ namespace FreemodeIdentity {
 			forceItem.Description = "Recovery escape hatch - press Enter to forcibly become the selected model. ~y~Comes back with default appearance~s~ - use Disable to return with your own look.";
 			forceItem.Activated += (s, a) => ForceModel(ForceModelNames[forceItem.SelectedIndex]);
 			DebugMenu.Add(forceItem);
-
-			// Diagnostic: locate the head blend by sweeping memory for this ped's heritage triple,
-			// independent of whether the finder can reach it, then log who points at what it finds.
-			// Manual because it's a multi-gigabyte scan, and only meaningful on a distinctive face.
-			NativeItem sweepItem = new NativeItem("Find Head-Blend Path") {
-				Description = "Diagnostic - sweeps memory for this character's face data and logs where it sits. Takes a while; use on a ~y~distinctive~s~ character, then send the log."
-			};
-			sweepItem.Activated += (s, a) => {
-				Ped p = Game.Player?.Character;
-				if (p == null) {
-					return;
-				}
-				Notify("Sweeping memory for the head blend - watch the log.");
-				PedHeadBlendMemory.BeginSweep(p);
-			};
-			DebugMenu.Add(sweepItem);
 
 			NativeItem openDataFolder = new NativeItem("Open Data Folder") {
 				Description = "Opens the folder holding the slots, config, logs and saved state."
